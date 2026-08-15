@@ -1,9 +1,8 @@
 name: Deploy
 
+# Legacy full-stack deployment. Khaabo's production deployment uses
+# deploy-free.yml; retain this workflow only for an intentional manual run.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
