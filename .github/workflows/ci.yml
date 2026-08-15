@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ─── Backend: lint + tests (no DB required) ─────────────────────────────────
+  backend:
+    name: Backend · lint + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: . .venv/bin/activate && ruff check app scripts tests
+
+      - name: Ruff format check
+        run: . .venv/bin/activate && ruff format --check app scripts tests
+
+      - name: Tests (unit only — DB-backed tests skip without PostGIS)
+        env:
+          AUTH_DEV_BYPASS: "true"
+          CACHE_ENABLED: "false"
+          RATE_LIMIT_ENABLED: "false"
+        run: . .venv/bin/activate && python -m pytest tests/ -q
+
+  # ─── Backend: full suite with PostgreSQL + PostGIS ──────────────────────────
+  backend-db:
+    name: Backend · DB integration tests
+    runs-on: ubuntu-latest
+    needs: backend
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: khaabo
+          POSTGRES_PASSWORD: khaabo
+          POSTGRES_DB: khaabo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U khaabo -d khaabo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Apply migration
+        env:
+          DATABASE_URL: postgresql+psycopg://khaabo:khaabo@localhost:5432/khaabo_test
+          SYNC_DATABASE_URL: postgresql+psycopg://khaabo:khaabo@localhost:5432/khaabo_test
+        run: . .venv/bin/activate && alembic upgrade head
+
+      - name: Full test suite (DB-backed tests now run)
+        env:
+          DATABASE_URL: postgresql+psycopg://khaabo:khaabo@localhost:5432/khaabo_test
+          SYNC_DATABASE_URL: postgresql+psycopg://khaabo:khaabo@localhost:5432/khaabo_test
+          AUTH_DEV_BYPASS: "true"
+          CACHE_ENABLED: "false"
+          RATE_LIMIT_ENABLED: "false"
+        run: . .venv/bin/activate && python -m pytest tests/ -q
+
+  # ─── Frontend: lint + test + typecheck + build ───────────────────────────────
+  frontend:
+    name: Frontend · lint + test + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Tests
+        run: npx vitest run
+
+      - name: Build
+        run: npm run build
+
+  # ─── Docker images build test (no push on PR) ───────────────────────────────
+  images:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend (prod target)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: prod
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+          tags: khaabo-backend:ci
+
+      - name: Build frontend (prod target)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          target: prod
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+          tags: khaabo-frontend:ci
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+
+      - name: Smoke test backend health
+        run: |
+          docker run -d --name backend-smoke -p 8001:8000 \
+            -e ENV=development \
+            -e AUTH_DEV_BYPASS=true \
+            -e DATABASE_URL=postgresql+psycopg://x:x@localhost:5432/x \
+            khaabo-backend:ci
+          sleep 3
+          # The container starts; health will report "degraded" since there's no
+          # real DB, but the process must not crash.
+          docker logs backend-smoke
+          curl -s http://localhost:8001/api/v1/health | grep -q "status"
+          docker rm -f backend-smoke

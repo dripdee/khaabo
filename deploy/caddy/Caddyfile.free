@@ -1,0 +1,48 @@
+# Free-tier Caddy — only the API subdomain.
+#
+# The SPA lives on Cloudflare Pages (khaabo.pages.dev / your apex), and calls
+# this API cross-origin. CORS is handled in-app via CORS_ORIGINS, so Caddy only
+# needs to terminate TLS and forward to the uvicorn process.
+#
+# Override the domain with the `DOMAIN` env var at container startup.
+# `{$DOMAIN_EMAIL}` is used for Let's Encrypt's expiry notifications.
+
+{
+	admin off
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Security headers — defense in depth. CORS is enforced in-app.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), interest-cohort=()"
+		-Cache-Control
+	}
+
+	# Anything under /api/v1, plus the docs surface, belongs to the FastAPI app.
+	@backend path /api/* /docs /redoc /openapi.json
+	reverse_proxy @backend {$API_UPSTREAM} {
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		transport http {
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
+
+	# Root redirect — anything not matched above (e.g. someone hits api.khaabo.in/
+	# in a browser) sends them back to the SPA's apex. Pleasant UX, no info leak.
+	@notbackend not path /api/* /docs /redoc /openapi.json
+	redir @notbackend {$PAGES_URL}{uri} 308
+
+	# Rate-limit-friendly: don't let a crawler hammer /docs.
+	respond /robots.txt 200 {
+		body "User-agent: *\nDisallow: /\n"
+		Content-Type text/plain
+	}
+}

@@ -1,0 +1,191 @@
+# Production overlay — used with the base compose:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences from the dev compose:
+#  * `target: prod` images (non-root, no dev deps, no --reload)
+#  * No source bind mounts — the image is the source of truth
+#  * Resource limits so a runaway worker cannot OOM the host
+#  * Logging config capped to prevent disk exhaustion
+#  * All deps gated on healthchecks
+#  * Frontend served by nginx (prod target) — Vite dev server never leaves dev
+#
+# Required environment (must be set or the app will refuse to start):
+#   ENV=production, SECRET_KEY, CORS_ORIGINS, PUBLIC_BASE_URL, CONTACT_EMAIL
+#   SUPABASE_URL, SUPABASE_JWT_SECRET (or JWKS), SUPABASE_ANON_KEY
+
+x-api-env: &api-env
+  DATABASE_URL: postgresql+psycopg://${DB_USER:-khaabo}:${DB_PASSWORD:?DB_PASSWORD required}@db:5432/${DB_NAME:-khaabo}
+  SYNC_DATABASE_URL: postgresql+psycopg://${DB_USER:-khaabo}:${DB_PASSWORD:?DB_PASSWORD required}@db:5432/${DB_NAME:-khaabo}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  ENV: production
+  DEBUG: "false"
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
+  CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS required}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL required}
+  CONTACT_EMAIL: ${CONTACT_EMAIL:?CONTACT_EMAIL required}
+  DEFAULT_CITY_SLUG: ${DEFAULT_CITY_SLUG:-kolkata}
+  SUPABASE_URL: ${SUPABASE_URL:-}
+  SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+  SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+  SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL:-}
+  AUTH_DEV_BYPASS: "false"
+  AI_PROVIDER: ${AI_PROVIDER:-heuristic}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+  REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+  REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+  REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-khaabo/0.1}
+  YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+  SOURCES_ENABLED: ${SOURCES_ENABLED:-osm,user}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+  SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.0}
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    environment:
+      POSTGRES_USER: ${DB_USER:-khaabo}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
+      POSTGRES_DB: ${DB_NAME:-khaabo}
+    ports: []
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: prod
+    environment: *api-env
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000
+             --workers 2 --proxy-headers --forwarded-allow-ips '*'"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes: []
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: prod
+    environment: *api-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=warning
+      --concurrency=${CELERY_CONCURRENCY:-2}
+      -Q ingestion,ai_processing,ranking,summarization
+    volumes: []
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: prod
+    environment: *api-env
+    command: celery -A app.workers.celery_app beat --loglevel=warning
+    volumes: []
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: prod
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+        VITE_SUPABASE_URL: ${SUPABASE_URL:-}
+        VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+        VITE_DEFAULT_CITY: ${VITE_DEFAULT_CITY:-kolkata}
+    ports: []
+    volumes: []
+    depends_on:
+      - api
+    restart: always
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/caddy/Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN required}
+      API_UPSTREAM: api:8000
+      WEB_UPSTREAM: web:80
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: always
+    logging: *default-logging
+
+  ollama:
+    profiles: ["ai"]
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+volumes:
+  caddy_data:
+  caddy_config:

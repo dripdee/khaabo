@@ -1,0 +1,64 @@
+# Khaabo monitoring stack — run with the `ops` profile:
+#   docker compose --profile ops -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Exposes:
+#   Prometheus  :9090
+#   Loki        :3100  (log aggregation — scrape from docker logs via promtail)
+#   Grafana     :3000  (admin/admin, change immediately)
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["ops"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    profiles: ["ops"]
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+    command: -config.file=/etc/promtail/promtail.yml
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    profiles: ["ops"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["ops"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  loki_data:
+  grafana_data:

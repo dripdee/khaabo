@@ -1,0 +1,38 @@
+# ── env / secrets ────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+celerybeat-schedule*
+
+# ── node ─────────────────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+coverage/
+
+# ── editors / os ─────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── data / logs ──────────────────────────────────────────────────
+*.log
+*.sqlite3
+/data/
+/backups/

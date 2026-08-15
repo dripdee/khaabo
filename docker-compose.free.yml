@@ -1,0 +1,165 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Free-tier production overlay — runs only the API stack on a 1GB Oracle Cloud
+# Always Free VM. The database (Supabase free Postgres+PostGIS) and Redis
+# (Upstash free) live on external managed services, so nothing local runs heavy
+# state.
+#
+# Services on the VM: api (uvicorn ×2), worker, beat, caddy.
+# External:            Supabase Postgres, Upstash Redis, Cloudflare Pages SPA.
+#
+# Usage:
+#   cp .env.example .env                   # then fill the *:required* vars
+#   docker compose -f docker-compose.yml -f docker-compose.free.yml up -d
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-api-env: &api-env
+  # ── External database: Supabase free Postgres (PostGIS preinstalled) ───────
+  # Use the *session* / direct-connection pooling URL for migrations. Use the
+  # transaction-mode pooler URL (port 6543) for the async pool at runtime.
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL required — Supabase connection}
+  SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:-${DATABASE_URL}}
+  # ── External Redis: Upstash free ─────────────────────────────────────────
+  # Upstash uses TLS, so the URL is `rediss://...` (note the double s).
+  # Prefixes: db/cache=0, broker=1, result backend=2 — no-op in a managed Redis.
+  REDIS_URL: ${REDIS_URL:?REDIS_URL required — Upstash rediss:// URL}
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-${REDIS_URL}}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-${REDIS_URL}}
+  # ── App ───────────────────────────────────────────────────────────────────
+  ENV: production
+  DEBUG: "false"
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
+  CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS required}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL required}
+  CONTACT_EMAIL: ${CONTACT_EMAIL:?CONTACT_EMAIL required}
+  DEFAULT_CITY_SLUG: ${DEFAULT_CITY_SLUG:-kolkata}
+  SUPABASE_URL: ${SUPABASE_URL:-}
+  SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+  SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+  SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL:-}
+  AUTH_DEV_BYPASS: "false"
+  AI_PROVIDER: ${AI_PROVIDER:-heuristic}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+  REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+  REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+  REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-khaabo/0.1}
+  YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+  SOURCES_ENABLED: ${SOURCES_ENABLED:-osm,user}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+  SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.0}
+  # Disable local Postgres/Redis: the prod overlay's db/redis are skipped by
+  # the per-service `profiles: ["local-only"]` below.
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "8m"
+    max-file: "3"
+
+services:
+  # ── The VM does NOT run Postgres / Redis for free-tier deploys. These are
+  # stubs that are skipped unless you also pass `--profile local-only`, in
+  # which case the default docker-compose.yml definitions from the base compose
+  # take over.
+  db:
+    profiles: ["local-only"]
+  redis:
+    profiles: ["local-only"]
+
+  api:
+    image: ${API_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER:-khaabo}/khaabo-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: prod
+    environment: *api-env
+    # The image runs alembic on startup; `--proxy-headers` lets Caddy forward the
+    # real client IP for rate-limiting. One uvicorn worker, not two — a 1GB VM
+    # cannot keep two Python processes plus Celery alive without swap pressure.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000
+             --workers 1 --proxy-headers --forwarded-allow-ips '*'"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes: []
+    # No depends_on: db/redis are external services reachable over the internet
+    # from the VM; the app itself re-tries stale pools with `pool_pre_ping`.
+    # `!reset []` is the compose way to override an inherited array.
+    depends_on: !reset []
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  worker:
+    image: ${API_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER:-khaabo}/khaabo-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: prod
+    environment: *api-env
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=warning
+      --concurrency=1
+      -Q ingestion,ai_processing,ranking,summarization
+    volumes: []
+    depends_on: !reset []  # external Upstash Redis — no local service to wait on
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  beat:
+    image: ${API_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER:-khaabo}/khaabo-backend:latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: prod
+    environment: *api-env
+    command: celery -A app.workers.celery_app beat --loglevel=warning
+    volumes: []
+    depends_on: !reset []
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/caddy/Dockerfile
+      args:
+        CADDYFILE_NAME: Caddyfile.free
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN required}
+      API_UPSTREAM: api:8000
+      PAGES_URL: ${PAGES_URL:?PAGES_URL required — https://your-site.pages.dev}
+    depends_on:
+      - api
+    restart: always
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+
+volumes:
+  caddy_data:
+  caddy_config:

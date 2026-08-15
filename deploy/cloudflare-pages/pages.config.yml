@@ -1,0 +1,43 @@
+# Cloudflare Pages — Build & Hosting configuration for the Khaabo SPA.
+#
+# Upload this file as the project's Pages dashboard settings, or push the repo
+# and connect Pages to it. Everything here is declarative; no Workers needed.
+
+# ── Build settings ──────────────────────────────────────────────────────────
+root: frontend
+package_manager: npm
+# Cloudflare Pages respects environment variables set in the dashboard's
+# Settings → Environment Variables. Build-time inject only the *public* ones —
+# never put secrets here.
+build_env:
+  VITE_API_BASE_URL: "https://api.khaabo.in/api/v1"
+build_command: npm ci && npm run build
+output_dir: dist
+# Same Node.js version we use locally and in the CI workflow.
+node_version: "22"
+
+# ── Routing / caching ──────────────────────────────────────────────────────
+# `_redirects` (already in frontend/public/) handles SPA fallback. For extra
+# control, you can also drop a `cf-pages-headers` file here. Below are the
+# headers we want applied to the static output, plus a sitemap route.
+headers:
+  - path: /assets/*
+    headers:
+      Cache-Control: "public, max-age=31536000, immutable"
+  # Strong security headers at the CDN edge — the same set Caddy would add
+  # if we ran the SPA through Caddy. Pages lets us set them here for free.
+  - path: /*
+    headers:
+      X-Content-Type-Options: "nosniff"
+      X-Frame-Options: "DENY"
+      Referrer-Policy: "strict-origin-when-cross-origin"
+      Permissions-Policy: "geolocation=(), interest-cohort=()"
+
+# Pages' automatic SPA fallback uses `_redirects` 200 → /index.html, so the
+# only thing left to do here is the rewrite of the canonical SEO pages.
+
+# ── Deploy ──────────────────────────────────────────────────────────────────
+# Connecting via dashboard: connect this GitHub repo → Pages picks up this file.
+# DNS: create a CNAME `khaabo.in` → `<project>.pages.dev` (Pages does it for
+# you when you add the custom domain), and an A record `api.khaabo.in` → the
+# Oracle VM IP. Both records are added in Cloudflare's DNS — free.

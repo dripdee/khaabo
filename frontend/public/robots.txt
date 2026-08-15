@@ -1,0 +1,8 @@
+# https://www.robotstxt.org/robotstxt.html
+User-agent: *
+Allow: /
+
+# API endpoints are not meant for crawlers
+Disallow: /api/
+
+Sitemap: https://khaabo.in/sitemap.xml
