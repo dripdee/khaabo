@@ -1,6 +1,6 @@
 {
   "name": "khaabo",
-  "main" = "./src/worker.js"   
+  "main": "./src/worker.js",   
   "compatibility_date": "2026-08-15",
   "assets": {
     "directory": "./frontend/dist"
