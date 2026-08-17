@@ -6,6 +6,7 @@ ingestion and a ranking sweep cannot delay a user's review appearing.
 
 from __future__ import annotations
 
+import os
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from celery import Celery
@@ -28,6 +29,13 @@ def _add_ssl_cert_reqs(url: str) -> str:
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     query.setdefault("ssl_cert_reqs", "CERT_REQUIRED")
     return parts._replace(query=urlencode(query)).geturl()
+
+
+# Celery merges CELERY_* env vars into its settings *after* constructor args,
+# so the container env vars must be sanitized too — not just the pydantic ones.
+for _var in ("CELERY_BROKER_URL", "CELERY_RESULT_BACKEND", "BROKER_URL"):
+    if _val := os.environ.get(_var):
+        os.environ[_var] = _add_ssl_cert_reqs(_val)
 
 
 celery_app = Celery(
