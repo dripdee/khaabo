@@ -331,7 +331,7 @@ ls -la backups/
 | 4. SPA calls API | On the SPA, type "bir" in the search box | Live suggestions (network tab: 200) |
 | 5. Worker active | `make -C /opt/khaabo free-logs` (or `docker logs worker`) | Logs showing beat schedules firing |
 | 6. Trends page | `https://khaabo.in/trending` | Empty state until enough reviews exist |
-| 7. Submit review (auth required) | `https://khaabo.in/submit-review` | Supabase login → form |
+| 7. Submit review (auth required) | `https://khaabo.in/review/new` | Supabase login → form |
 | 8. Origins | `curl -I https://khaabo.in/` | `x-content-type-options: nosniff`, etc. |
 | 9. TLS cert | `curl -vI https://api.khaabo.in 2>&1 \| grep -i 'expire'` | Expiry ~90 days out, auto-renews |
 

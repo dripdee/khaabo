@@ -8,7 +8,12 @@ import { App } from "@/App";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthProvider } from "@/providers/AuthProvider";
 import { queryClient } from "@/lib/queryClient";
+import { captureRedirectedSession } from "@/lib/supabase";
 import "@/styles/index.css";
+
+// Email-confirmation redirects land with the session in the URL fragment; pick
+// it up before React mounts so the first render already knows the user.
+captureRedirectedSession();
 
 const container = document.getElementById("root");
 if (!container) throw new Error("Root element #root is missing from index.html");

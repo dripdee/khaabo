@@ -72,6 +72,58 @@ async function authRequest<T>(path: string, body: unknown): Promise<T> {
   return payload as T;
 }
 
+/**
+ * After email confirmation Supabase redirects back with the session in the URL
+ * fragment (`#access_token=...&refresh_token=...&expires_in=...`). Capture it as
+ * a local session and clean the URL so the token never survives a reload/share.
+ * Returns true when a redirected session was consumed.
+ */
+export function captureRedirectedSession(): boolean {
+  if (typeof window === "undefined") return false;
+  const fragment = window.location.hash.replace(/^#/, "");
+  if (!fragment || !fragment.includes("access_token=")) return false;
+
+  const params = new URLSearchParams(fragment);
+  const accessToken = params.get("access_token");
+  if (!accessToken) return false;
+
+  const payload = decodeJwtPayload(accessToken);
+  const expiresIn = Number(params.get("expires_in") ?? "0");
+  const expiresAtFromToken = payload?.exp ? Number(payload.exp) : 0;
+  const expiresAt = expiresAtFromToken || (expiresIn ? Math.floor(Date.now() / 1000) + expiresIn : undefined);
+
+  writeSession({
+    access_token: accessToken,
+    refresh_token: params.get("refresh_token") ?? undefined,
+    expires_at: expiresAt,
+    user: {
+      id: payload?.sub ?? "supabase-user",
+      email: payload?.email ?? undefined,
+    },
+  });
+
+  const cleanUrl = window.location.pathname + window.location.search;
+  window.history.replaceState(null, "", cleanUrl);
+  return true;
+}
+
+function decodeJwtPayload(token: string): { sub?: string; email?: string; exp?: number } | null {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const json = decodeURIComponent(
+      atob(normalized)
+        .split("")
+        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`)
+        .join(""),
+    );
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 export const auth = {
   getSession: readSession,
 
