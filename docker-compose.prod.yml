@@ -105,6 +105,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # The base image healthcheck curls localhost:8000 (API-only). For the
+    # worker, ask it to ping itself over the broker instead.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping --timeout 20 | grep -q pong"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
     restart: always
     logging: *default-logging
     deploy:
@@ -123,6 +131,13 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # Beat has no RPC endpoint; verify it's alive and maintaining its schedule db.
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat-schedule"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: always
     logging: *default-logging
     deploy:
