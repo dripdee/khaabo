@@ -6,6 +6,8 @@ ingestion and a ranking sweep cannot delay a user's review appearing.
 
 from __future__ import annotations
 
+from urllib.parse import parse_qsl, urlencode, urlsplit
+
 from celery import Celery
 from celery.schedules import crontab
 
@@ -16,10 +18,22 @@ from app.core.sentry import init_sentry
 configure_logging()
 init_sentry()
 
+
+def _add_ssl_cert_reqs(url: str) -> str:
+    """Upstash-style rediss URLs must declare ssl_cert_reqs, or Celery refuses
+    to instantiate the Redis backend (E_REDIS_SSL_CERT_REQS_MISSING_INVALID)."""
+    if not url.lower().startswith(("rediss://", "redis+ssl://")):
+        return url
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("ssl_cert_reqs", "CERT_REQUIRED")
+    return parts._replace(query=urlencode(query)).geturl()
+
+
 celery_app = Celery(
     "khaabo",
-    broker=settings.celery_broker_url,
-    backend=settings.celery_result_backend,
+    broker=_add_ssl_cert_reqs(settings.celery_broker_url),
+    backend=_add_ssl_cert_reqs(settings.celery_result_backend),
     include=[
         "app.workers.ingestion_tasks",
         "app.workers.ai_tasks",
@@ -41,6 +55,9 @@ celery_app.conf.update(
     task_soft_time_limit=1500,
     result_expires=86400,
     broker_connection_retry_on_startup=True,
+    # In prod the image's WORKDIR is not writable when the compose overlay fails
+    # (or the user is non-root); /tmp always works and the schedule is ephemeral.
+    beat_schedule_filename="/tmp/celerybeat-schedule",
     task_default_queue="ingestion",
     task_routes={
         "ingestion.*": {"queue": "ingestion"},
