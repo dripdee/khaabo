@@ -12,6 +12,8 @@
 #
 # Required env (or pass flags):
 #   DATABASE_URL or build from DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME
+#   (when neither is set, DATABASE_URL is read from ../.env automatically;
+#    pg_dump runs from a pinned postgres docker image when docker is present)
 #   BACKUP_DIR (default: ./backups)
 #   BACKUP_RETENTION_DAYS (default: 7)
 # Optional:
@@ -34,10 +36,27 @@ S3_BUCKET="${S3_BUCKET:-}"
 S3_PREFIX="${S3_PREFIX:-backups/db}"
 LOCK_FILE="${LOCK_FILE:-/tmp/khaabo-backup.lock}"
 
+# Fall back to the repo's .env when run bare (e.g. ./scripts/backup-db.sh).
+if [[ -z "${DATABASE_URL:-}" && -z "${DB_HOST:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for ENV_FILE in "$SCRIPT_DIR/../.env" ./.env; do
+        if [[ -f "$ENV_FILE" ]]; then
+            DATABASE_URL="$(grep -m1 ^DATABASE_URL "$ENV_FILE" | cut -d= -f2-)" || true
+            if [[ -n "$DATABASE_URL" ]]; then break; fi
+        fi
+    done
+fi
+
+# pg_dump doesn't understand SQLAlchemy driver suffixes (+psycopg, +asyncpg…).
+if [[ -n "${DATABASE_URL:-}" ]]; then
+    DATABASE_URL="${DATABASE_URL/postgresql+psycopg:/postgresql:}"
+    DATABASE_URL="${DATABASE_URL/postgresql+asyncpg:/postgresql:}"
+    DATABASE_URL="${DATABASE_URL/postgres+psycopg:/postgres:}"
+fi
+
 # Database connection: prefer DATABASE_URL, else compose from parts.
 if [[ -n "${DATABASE_URL:-}" ]]; then
-    # pg_dump parses the full URL directly; nothing else to do.
-    DB_ARGS=("$DATABASE_URL")
+    PG_URL="$DATABASE_URL"
 else
     DB_HOST="${DB_HOST:-localhost}"
     DB_PORT="${DB_PORT:-5432}"
@@ -45,7 +64,19 @@ else
     DB_PASSWORD="${DB_PASSWORD:-khaabo}"
     DB_NAME="${DB_NAME:-khaabo}"
     export PGPASSWORD="$DB_PASSWORD"
-    DB_ARGS=(-h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" "$DB_NAME")
+    PG_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+fi
+
+# Prefer a pinned Postgres image for pg_dump: Ubuntu 22.04 ships pg_dump 14,
+# which refuses to dump PG 15/17 (what Supabase runs) — "server version mismatch".
+PG_IMAGE="${PG_IMAGE:-postgres:17-alpine}"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    RUNNER=docker
+elif command -v pg_dump >/dev/null 2>&1; then
+    RUNNER=local
+else
+    echo "[backup] ERROR: neither docker nor pg_dump found on this host" >&2
+    exit 1
 fi
 
 # â”€â”€ single-flight lock (a long backup must not overlap) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -57,16 +88,23 @@ fi
 
 # â”€â”€ prep â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 mkdir -p "$BACKUP_DIR"
+ABS_BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd)"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-FILE="$BACKUP_DIR/khaabo-${TIMESTAMP}.dump"
+BASENAME="khaabo-${TIMESTAMP}.dump"
+FILE="$ABS_BACKUP_DIR/$BASENAME"
 
 echo "[backup] starting pg_dump â†’ $FILE"
 
 # â”€â”€ dump (custom format: parallel + compressible + single self-contained file)
-if [[ -n "${DATABASE_URL:-}" ]]; then
-    pg_dump -Fc --no-owner --no-privileges "$DATABASE_URL" -f "$FILE"
+if [[ "$RUNNER" == docker ]]; then
+    docker run --rm --network host \
+        -e PG_URL="$PG_URL" \
+        -e DUMP_FILE="/backups/$BASENAME" \
+        -v "$ABS_BACKUP_DIR:/backups" \
+        "$PG_IMAGE" \
+        sh -c 'pg_dump -Fc --no-owner --no-privileges "$PG_URL" -f "$DUMP_FILE"'
 else
-    pg_dump -Fc --no-owner --no-privileges "${DB_ARGS[@]}" -f "$FILE"
+    pg_dump -Fc --no-owner --no-privileges "$PG_URL" -f "$FILE"
 fi
 
 # Verify the dump isn't empty â€” pg_dump can exit 0 on a dropped mid-operation DB.
@@ -114,7 +152,12 @@ fi
 
 # â”€â”€ verify: we can read the most recent backup's table of contents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 echo "[backup] verifying dump integrity via pg_restore --list"
-pg_restore --list "$FILE" >/tmp/khaabo-toc.txt
+if [[ "$RUNNER" == docker ]]; then
+    docker run --rm -v "$ABS_BACKUP_DIR:/backups" "$PG_IMAGE" \
+        pg_restore --list "/backups/$BASENAME" >/tmp/khaabo-toc.txt
+else
+    pg_restore --list "$FILE" >/tmp/khaabo-toc.txt
+fi
 TOC_LINES=$(wc -l </tmp/khaabo-toc.txt)
 if (( TOC_LINES < 30 )); then
     echo "[backup] WARN â€” table of contents has only $TOC_LINES lines, expected >30" >&2

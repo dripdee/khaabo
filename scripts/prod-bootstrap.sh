@@ -22,7 +22,7 @@ fi
 echo "==> updating apt + base toolkit"
 apt-get update -y
 apt-get upgrade -y
-apt-get install -y ca-certificates curl gnupg ufw fail2ban unattended-upgrades
+apt-get install -y ca-certificates curl gnupg ufw fail2ban unattended-upgrades postgresql-client
 
 # â”€â”€ Docker + compose v2 (from Docker's repo, not Ubuntu's stale one) â”€â”€â”€â”€â”€â”€â”€â”€
 echo "==> installing docker"

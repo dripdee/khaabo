@@ -14,6 +14,8 @@
 #
 # Required env:
 #   DATABASE_URL or DB_HOST/DB_PORT/DB_ADMIN_USER (superuser)/DB_PASSWORD/DB_NAME
+#   (when neither is set, DATABASE_URL is read from ../.env automatically;
+#    psql/pg_restore run from a pinned postgres docker image when docker is present)
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 set -euo pipefail
 
@@ -50,14 +52,68 @@ if [[ ! -f "$DUMP" ]]; then
 fi
 
 # â”€â”€ DB connection â†’ host/port/user/password/name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Fall back to the repo's .env when run bare (e.g. ./scripts/restore-db.sh).
+if [[ -z "${DATABASE_URL:-}" && -z "${DB_HOST:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for ENV_FILE in "$SCRIPT_DIR/../.env" ./.env; do
+        if [[ -f "$ENV_FILE" ]]; then
+            DATABASE_URL="$(grep -m1 ^DATABASE_URL "$ENV_FILE" | cut -d= -f2-)" || true
+            if [[ -n "$DATABASE_URL" ]]; then break; fi
+        fi
+    done
+fi
+
+# Decompose DATABASE_URL (SQLAlchemy driver suffix like +psycopg handled) into
+# plain pg connection parts.
+if [[ -n "${DATABASE_URL:-}" ]]; then
+    if [[ "$DATABASE_URL" =~ ^postgres(ql)?(\+[a-z]+)?://([^:]+):(.+)@([^:/]+):([0-9]+)/([A-Za-z0-9_-]+) ]]; then
+        DB_USER="${BASH_REMATCH[3]}"
+        DB_PASSWORD="${BASH_REMATCH[4]}"
+        DB_HOST="${BASH_REMATCH[5]}"
+        DB_PORT="${BASH_REMATCH[6]}"
+        DB_NAME="${BASH_REMATCH[7]}"
+    else
+        echo "[restore] ERROR could not parse DATABASE_URL" >&2
+        exit 1
+    fi
+fi
+
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 DB_USER="${DB_USER:-khaabo}"
 DB_NAME="${DB_NAME:-khaabo}"
 export PGPASSWORD="${DB_PASSWORD:-khaabo}"
 
+# Prefer a pinned Postgres image: Ubuntu 22.04 ships psql/pg_restore 14, which
+# refuses dumps from PG 15/17 servers (what Supabase runs).
+PG_IMAGE="${PG_IMAGE:-postgres:17-alpine}"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    RUNNER=docker
+elif command -v psql >/dev/null 2>&1; then
+    RUNNER=local
+else
+    echo "[restore] ERROR: neither docker nor psql found on this host" >&2
+    exit 1
+fi
+
+DUMP_DIR="$(cd "$(dirname "$DUMP")" && pwd)"
+DUMP_BASE="$(basename "$DUMP")"
+
+run_psql() { # run_psql <dbname> [psql args...]
+    local db="$1"; shift
+    if [[ "$RUNNER" == docker ]]; then
+        docker run --rm --network host \
+            -e PGPASSWORD="$DB_PASSWORD" \
+            -v "$DUMP_DIR:/dump" \
+            "$PG_IMAGE" \
+            psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$db" "$@"
+    else
+        psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$db" "$@"
+    fi
+}
+
 # â”€â”€ confirm the target DB isn't in use â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-CONNECTIONS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d postgres -tAc \
+CONNECTIONS=$(run_psql postgres -tAc \
     "SELECT count(*) FROM pg_stat_activity WHERE datname = '$DB_NAME' AND pid <> pg_backend_pid() \
     AND state <> 'idle'" 2>/dev/null || echo 0)
 if (( CONNECTIONS > 0 )); then
@@ -66,7 +122,7 @@ if (( CONNECTIONS > 0 )); then
 fi
 
 # â”€â”€ refuse to drop a non-empty DB unless --force â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-TABLE_COUNT=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+TABLE_COUNT=$(run_psql "$DB_NAME" -tAc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'" 2>/dev/null || echo 0)
 if [[ "$TABLE_COUNT" -gt 0 && "$FORCE" == false ]]; then
     cat >&2 <<EOF
@@ -79,25 +135,35 @@ EOF
 fi
 
 echo "[restore] DROP DATABASE + CREATE DATABASE $DB_NAME"
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 <<-SQL
-    SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
-    DROP DATABASE IF EXISTS "$DB_NAME";
-    CREATE DATABASE "$DB_NAME";
-SQL
+run_psql postgres -v ON_ERROR_STOP=1 -c \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME'" \
+    -c "DROP DATABASE IF EXISTS \"$DB_NAME\"" \
+    -c "CREATE DATABASE \"$DB_NAME\""
 
 # PostGIS extension must exist before restore (pg_dump can't fully recreate it).
 echo "[restore] installing postgis extension"
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+run_psql "$DB_NAME" -v ON_ERROR_STOP=1 \
     -c "CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS postgis_topology;"
 
 echo "[restore] pg_restore $DUMP â†’ $DB_NAME"
-pg_restore -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-    --no-owner --no-privileges --clean --if-exists -j 4 "$DUMP" || {
+if [[ "$RUNNER" == docker ]]; then
+    docker run --rm --network host \
+        -e PGPASSWORD="$DB_PASSWORD" \
+        -v "$DUMP_DIR:/dump" \
+        "$PG_IMAGE" \
+        pg_restore -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+            --no-owner --no-privileges --clean --if-exists -j 4 "/dump/$DUMP_BASE" || {
         echo "[restore] pg_restore completed with non-fatal errors (expected with --clean)" >&2
     }
+else
+    pg_restore -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+        --no-owner --no-privileges --clean --if-exists -j 4 "$DUMP" || {
+            echo "[restore] pg_restore completed with non-fatal errors (expected with --clean)" >&2
+        }
+fi
 
 echo "[restore] verifying row counts on core tables"
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c '
+run_psql "$DB_NAME" -c '
     SELECT
         (SELECT count(*) FROM dishes) AS dishes,
         (SELECT count(*) FROM restaurants) AS restaurants,
