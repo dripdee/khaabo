@@ -1,5 +1,0 @@
-# Single Page App fallback — used by Netlify / Cloudflare Pages / Vercel so
-# client-side routes (e.g. /dish/chicken-biryani) resolve to index.html
-# instead of a 404 on a static host that doesn't run nginx/Caddy.
-/*    /index.html   200
-

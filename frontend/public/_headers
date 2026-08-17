@@ -1,0 +1,11 @@
+# Per-path response headers for the khaabo frontend (Cloudflare static assets).
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+# Content-hashed build assets — cache forever.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

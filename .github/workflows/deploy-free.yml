@@ -1,17 +1,21 @@
 name: Deploy (free-tier)
 
 # Deploys the backend to the Oracle Cloud Always Free VM, pulling images from
-# GHCR. The SPA builds on Cloudflare Pages (push to main → CF builds + deploys).
+# GHCR, and the SPA to Cloudflare Workers static assets via wrangler.
 #
 # Required repo secrets (Settings → Secrets and variables → Actions):
-#   DEPLOY_HOST        Oracle VM public IP (e.g. 168.138.x.x)
-#   DEPLOY_USER        'ubuntu' on Oracle
-#   DEPLOY_SSH_KEY     private key for the deploy user (corresponding public
-#                       key must be in /home/ubuntu/.ssh/authorized_keys)
-#   GHCR_TOKEN         GitHub PAT with `read:packages` for the VM to pull images
+#   DEPLOY_HOST           Oracle VM public IP (e.g. 168.138.x.x)
+#   DEPLOY_USER           'ubuntu' on Oracle
+#   DEPLOY_SSH_KEY        private key for the deploy user (corresponding public
+#                         key must be in /home/ubuntu/.ssh/authorized_keys)
+#   GHCR_TOKEN            GitHub PAT with `read:packages` for the VM to pull images
+#   CLOUDFLARE_API_TOKEN  Wrangler deploy token (My Profile → API Tokens,
+#                         with "Workers Scripts — Edit" permission)
 #
-# Plus the secrets/vars that the *frontend* build needs (set on Cloudflare Pages
-# dashboard, NOT GitHub):
+# Required repo *variables* (Settings → Secrets → Variables):
+#   CLOUDFLARE_ACCOUNT_ID Cloudflare account ID
+#
+# Frontend build inputs (set as repo secrets; baked into the bundle at build):
 #   VITE_API_BASE_URL, VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
 
 on:
@@ -72,6 +76,44 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:${{ steps.meta.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:production
+
+  deploy-frontend:
+    name: Deploy SPA to Cloudflare (Workers static assets)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: npm run build
+
+      # wrangler.jsonc lives at the repo root; deploy from there so the
+      # assets.directory (./frontend/dist) resolves.
+      - name: Deploy static assets
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy
 
   deploy:
     name: Deploy to Oracle VM

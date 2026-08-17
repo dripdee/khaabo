@@ -36,3 +36,6 @@ Thumbs.db
 *.sqlite3
 /data/
 /backups/
+
+.wrangler/
+
