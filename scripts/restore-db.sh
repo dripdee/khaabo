@@ -2,10 +2,11 @@
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Khaabo â€” restore a database from a pg_dump backup.
 #
-# This is intentionally interactive: it refuses to run against a non-empty
-# database unless --force is passed, and it always drops and recreates the
-# target DB before restoring. Restore **must** be tested before you actually
-# need it.
+# This is intentionally guarded: it refuses to run against a non-empty
+# database unless --force is passed, and restores IN PLACE via
+# pg_restore --clean --if-exists (dropping the database itself would fail when
+# the target DB — e.g. Supabase's `postgres` — is the only database).
+# Restore **must** be tested before you actually need it.
 #
 # Usage:
 #   ./scripts/restore-db.sh /path/to/khaabo-20260101T020000Z.dump
@@ -134,11 +135,9 @@ EOF
     exit 1
 fi
 
-echo "[restore] DROP DATABASE + CREATE DATABASE $DB_NAME"
-run_psql postgres -v ON_ERROR_STOP=1 -c \
-    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME'" \
-    -c "DROP DATABASE IF EXISTS \"$DB_NAME\"" \
-    -c "CREATE DATABASE \"$DB_NAME\""
+echo "[restore] restoring IN PLACE into '$DB_NAME' (--clean --if-exists replaces schema + data)"
+run_psql "$DB_NAME" -v ON_ERROR_STOP=1 \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME' AND pid <> pg_backend_pid()" || true
 
 # PostGIS extension must exist before restore (pg_dump can't fully recreate it).
 echo "[restore] installing postgis extension"
