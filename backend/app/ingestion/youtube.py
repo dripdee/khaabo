@@ -1,14 +1,16 @@
 """YouTube Data API v3 adapter with a hard quota guard.
 
 The free tier is 10,000 units/day and `search.list` alone costs 100 units. The
-guard tracks spend in Redis and **stops the run** (`skipped`) rather than blowing
-the quota, because an exhausted quota breaks ingestion for the rest of the day.
+guard atomically reserves units in Redis before every call (rolling back if the
+call fails) and **stops the run** (`skipped`) once the daily budget would be
+exceeded — an exhausted quota breaks ingestion for the rest of the day.
 
 Only official API endpoints are used; no scraping, no transcript extraction.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -44,8 +46,11 @@ QUERY_TEMPLATES = (
 class QuotaGuard:
     """Daily unit budget, tracked in Redis so it survives worker restarts.
 
-    Without Redis it falls back to allowing the run: the per-run item caps still
-    bound the spend, and refusing to ingest at all would be worse.
+    `reserve()` is atomic (INCRBY, then roll back if the budget would be
+    crossed), so concurrent beat ticks or retries can never overshoot the cap.
+
+    Without Redis the run is still allowed: the per-run item caps bound the
+    spend, and refusing to ingest at all would be worse.
     """
 
     def __init__(self, budget: int) -> None:
@@ -64,20 +69,38 @@ class QuotaGuard:
         except Exception:
             return 0
 
-    async def can_afford(self, cost: int) -> bool:
-        return (await self.spent()) + cost <= self.budget
+    async def remaining(self) -> int:
+        return max(0, self.budget - await self.spent())
 
-    async def charge(self, cost: int) -> None:
+    async def reserve(self, cost: int) -> bool:
+        """Atomically reserve `cost` units against the daily budget.
+
+        Returns False (having reserved nothing) if the reservation would push
+        the day's spend past budget. Callers must never issue the API call
+        when this returns False.
+        """
+        client = get_redis()
+        if client is None:
+            return True
+        try:
+            new_total = await client.incrby(self._key(), cost)
+            await client.expire(self._key(), 172800, nx=True)
+            if new_total > self.budget:
+                # Over budget: take the reservation back and refuse the work.
+                await client.incrby(self._key(), -cost)
+                return False
+            return True
+        except Exception:
+            # Redis hiccup: allow the run — per-run caps still bound the spend.
+            return True
+
+    async def refund(self, cost: int) -> None:
+        """Return reserved units if the corresponding API call errored out."""
         client = get_redis()
         if client is None:
             return
-        try:
-            pipe = client.pipeline()
-            pipe.incrby(self._key(), cost)
-            pipe.expire(self._key(), 172800, nx=True)
-            await pipe.execute()
-        except Exception as exc:
-            log.warning("yt_quota_track_failed", error=str(exc))
+        with suppress(Exception):
+            await client.incrby(self._key(), -cost)
 
 
 class YouTubeAdapter(SourceAdapter):
@@ -104,30 +127,35 @@ class YouTubeAdapter(SourceAdapter):
 
         async with httpx.AsyncClient(timeout=30.0, base_url=API_BASE) as client:
             for template in QUERY_TEMPLATES:
-                if not await self.quota.can_afford(COST_SEARCH + COST_VIDEOS):
-                    log.info("youtube_quota_exhausted", spent=await self.quota.spent())
-                    break
                 if len(seen_video_ids) >= settings.youtube_max_videos_per_run:
+                    break
+                # Reserve search + video-detail units up front. An API call
+                # must never be issued without a held reservation.
+                if not await self.quota.reserve(COST_SEARCH + COST_VIDEOS):
+                    log.info("youtube_quota_exhausted", spent=await self.quota.spent())
                     break
 
                 query = template.format(city=city.name)
-                payload = await request_json(
-                    client,
-                    "GET",
-                    "/search",
-                    params={
-                        "key": settings.youtube_api_key,
-                        "part": "snippet",
-                        "q": query,
-                        "type": "video",
-                        "maxResults": 10,
-                        "order": "relevance",
-                        "publishedAfter": published_after,
-                        "relevanceLanguage": "en",
-                        "regionCode": "IN",
-                    },
-                )
-                await self.quota.charge(COST_SEARCH)
+                try:
+                    payload = await request_json(
+                        client,
+                        "GET",
+                        "/search",
+                        params={
+                            "key": settings.youtube_api_key,
+                            "part": "snippet",
+                            "q": query,
+                            "type": "video",
+                            "maxResults": 10,
+                            "order": "relevance",
+                            "publishedAfter": published_after,
+                            "relevanceLanguage": "en",
+                            "regionCode": "IN",
+                        },
+                    )
+                except Exception:
+                    await self.quota.refund(COST_SEARCH + COST_VIDEOS)
+                    raise
 
                 video_ids = [
                     item["id"]["videoId"]
@@ -136,20 +164,25 @@ class YouTubeAdapter(SourceAdapter):
                 ]
                 video_ids = [v for v in video_ids if v not in seen_video_ids]
                 if not video_ids:
+                    # Search succeeded; refund only the unused video-detail part.
+                    await self.quota.refund(COST_VIDEOS)
                     continue
                 seen_video_ids.update(video_ids)
 
-                details = await request_json(
-                    client,
-                    "GET",
-                    "/videos",
-                    params={
-                        "key": settings.youtube_api_key,
-                        "part": "snippet,statistics",
-                        "id": ",".join(video_ids[:25]),
-                    },
-                )
-                await self.quota.charge(COST_VIDEOS)
+                try:
+                    details = await request_json(
+                        client,
+                        "GET",
+                        "/videos",
+                        params={
+                            "key": settings.youtube_api_key,
+                            "part": "snippet,statistics",
+                            "id": ",".join(video_ids[:25]),
+                        },
+                    )
+                except Exception:
+                    await self.quota.refund(COST_VIDEOS)
+                    raise
 
                 for item in details.get("items", []):
                     review = self._video_to_review(item, city)
@@ -198,4 +231,4 @@ class YouTubeAdapter(SourceAdapter):
         )
 
     async def health(self) -> bool:
-        return self.configured and await self.quota.can_afford(COST_SEARCH)
+        return self.configured and await self.quota.remaining() >= COST_SEARCH + COST_VIDEOS

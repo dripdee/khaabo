@@ -16,7 +16,7 @@ from app.ingestion.base import CityRef
 from app.ingestion.osm import OSM_ATTRIBUTION, OverpassAdapter, build_overpass_query
 from app.ingestion.reddit import RedditAdapter
 from app.ingestion.registry import enabled_adapters, get_adapter, interval_hours
-from app.ingestion.youtube import YouTubeAdapter
+from app.ingestion.youtube import COST_SEARCH, COST_VIDEOS, QuotaGuard, YouTubeAdapter
 from app.models.enums import SourceType
 from app.utils.text import clean_text, content_hash, extract_prices, normalize_name, slugify
 
@@ -258,6 +258,112 @@ class TestYouTubeQuota:
 
     def test_quota_budget_is_bounded(self):
         assert self.adapter.quota.budget > 0
+
+
+class FakeRedis:
+    """Minimal async stand-in for the parts of redis used by QuotaGuard."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, int] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def incrby(self, key, amount):
+        self.store[key] = self.store.get(key, 0) + amount
+        return self.store[key]
+
+    async def expire(self, key, ttl, nx=False):
+        return True
+
+
+class TestQuotaGuard:
+    """The daily YouTube quota must be hard-enforced: YouTube's free tier is
+    10k units/day, and a search costs 100 — an overrun blocks ingestion for the
+    rest of the day."""
+
+    async def test_reservations_succeed_within_budget(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: fake)
+        guard = QuotaGuard(budget=300)
+
+        assert await guard.reserve(COST_SEARCH + COST_VIDEOS) is True
+        assert await guard.reserve(COST_SEARCH + COST_VIDEOS) is True
+        assert await guard.spent() == 2 * (COST_SEARCH + COST_VIDEOS)
+
+    async def test_reservation_crossing_budget_is_refused_and_rolled_back(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: fake)
+        guard = QuotaGuard(budget=COST_SEARCH + COST_VIDEOS + 50)
+
+        assert await guard.reserve(COST_SEARCH + COST_VIDEOS) is True
+        # A second full reservation would cross the budget: refuse it AND
+        # leave the counter untouched (nothing was actually spent).
+        assert await guard.reserve(COST_SEARCH + COST_VIDEOS) is False
+        assert await guard.spent() == COST_SEARCH + COST_VIDEOS
+
+    async def test_refund_returns_units_when_the_call_fails(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: fake)
+        guard = QuotaGuard(budget=COST_SEARCH + COST_VIDEOS)
+
+        assert await guard.reserve(COST_SEARCH) is True
+        await guard.refund(COST_SEARCH)
+        assert await guard.spent() == 0
+        # Budget is intact after the failed call: a fresh reservation still fits.
+        assert await guard.reserve(COST_SEARCH + COST_VIDEOS) is True
+
+    async def test_remaining_reflects_budget(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: fake)
+        guard = QuotaGuard(budget=500)
+
+        assert await guard.remaining() == 500
+        await guard.reserve(COST_SEARCH)
+        assert await guard.remaining() == 500 - COST_SEARCH
+
+    async def test_no_redis_means_run_is_allowed_but_capped_by_item_limits(self, monkeypatch):
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: None)
+        guard = QuotaGuard(budget=100)
+        # Without a Redis we can't enforce, but we also don't want to refuse
+        # ingestion entirely — per-run item caps still bound the spend.
+        assert await guard.reserve(COST_SEARCH) is True
+        assert await guard.spent() == 0
+
+    async def test_never_reserves_more_units_than_the_budget_across_many_calls(self, monkeypatch):
+        """Simulates the worst case: a burst of reservations from concurrent
+        retries. Total accepted spend must stay at or under the budget."""
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: fake)
+        budget = 9000
+        guard = QuotaGuard(budget=budget)
+
+        accepted = 0
+        for _ in range(100):
+            if await guard.reserve(COST_SEARCH + COST_VIDEOS):
+                accepted += COST_SEARCH + COST_VIDEOS
+
+        assert accepted <= budget
+        assert await guard.spent() == accepted
+
+    async def test_adapter_stops_fetching_once_budget_exhausted(self, monkeypatch):
+        """When the quota is gone, the adapter must not issue any API call."""
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.youtube.get_redis", lambda: fake)
+        monkeypatch.setattr("app.ingestion.youtube.settings.youtube_api_key", "test-key")
+
+        adapter = YouTubeAdapter()
+        adapter.quota = QuotaGuard(budget=1)  # far too small for one search
+
+        assert await adapter.fetch_reviews(KOLKATA) == []
+        # Nothing was ever reserved because the first reservation was refused.
+        assert await adapter.quota.spent() == 0
+
+    async def test_search_unit_cost_is_100(self):
+        """Documents Google's pricing assumption; if Google changes this the
+        guard must be re-derived."""
+        assert COST_SEARCH == 100
+        assert COST_VIDEOS == 1
 
 
 class TestRegistry:
