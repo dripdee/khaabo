@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from typing import Any
+
 from sqlalchemy import Enum as SQLEnum
 
 

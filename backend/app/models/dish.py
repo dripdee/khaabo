@@ -9,7 +9,6 @@ from sqlalchemy import (
     Boolean,
     Computed,
     DateTime,
-    Enum,
     ForeignKey,
     Index,
     Integer,
