@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDMixin
-from app.models.enums import ScoreStatus, TrendDirection, TrendSubject
+from app.models.enums import ScoreStatus, TrendDirection, TrendSubject, pg_enum
 
 
 class DishScore(UUIDMixin, TimestampMixin, Base):
@@ -77,7 +77,7 @@ class DishScore(UUIDMixin, TimestampMixin, Base):
     is_most_consistent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     trend: Mapped[TrendDirection | None] = mapped_column(
-        Enum(TrendDirection, name="trend_direction")
+        pg_enum(TrendDirection, name="trend_direction")
     )
     trend_delta: Mapped[float | None] = mapped_column(Numeric(5, 4))
 
@@ -86,7 +86,7 @@ class DishScore(UUIDMixin, TimestampMixin, Base):
         ARRAY(String(48)), nullable=False, default=list
     )
     status: Mapped[ScoreStatus] = mapped_column(
-        Enum(ScoreStatus, name="score_status"),
+        pg_enum(ScoreStatus, name="score_status"),
         nullable=False,
         default=ScoreStatus.INSUFFICIENT_DATA,
     )
@@ -129,7 +129,7 @@ class RestaurantScore(UUIDMixin, TimestampMixin, Base):
     price_level: Mapped[int | None] = mapped_column(SmallInteger)
 
     trend: Mapped[TrendDirection | None] = mapped_column(
-        Enum(TrendDirection, name="trend_direction")
+        pg_enum(TrendDirection, name="trend_direction")
     )
     trend_delta: Mapped[float | None] = mapped_column(Numeric(5, 4))
 
@@ -139,7 +139,7 @@ class RestaurantScore(UUIDMixin, TimestampMixin, Base):
     )
     evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[ScoreStatus] = mapped_column(
-        Enum(ScoreStatus, name="score_status"),
+        pg_enum(ScoreStatus, name="score_status"),
         nullable=False,
         default=ScoreStatus.INSUFFICIENT_DATA,
     )
@@ -183,7 +183,7 @@ class TrendMetric(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "trend_metrics"
 
     subject_type: Mapped[TrendSubject] = mapped_column(
-        Enum(TrendSubject, name="trend_subject"), nullable=False
+        pg_enum(TrendSubject, name="trend_subject"), nullable=False
     )
     dish_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("dishes.id", ondelete="CASCADE")
@@ -202,7 +202,7 @@ class TrendMetric(UUIDMixin, TimestampMixin, Base):
     historical_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     delta: Mapped[float | None] = mapped_column(Numeric(5, 4))
     direction: Mapped[TrendDirection | None] = mapped_column(
-        Enum(TrendDirection, name="trend_direction")
+        pg_enum(TrendDirection, name="trend_direction")
     )
     significant: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     computed_at: Mapped[datetime] = mapped_column(

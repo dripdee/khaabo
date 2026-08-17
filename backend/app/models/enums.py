@@ -7,6 +7,18 @@ Pydantic schemas, so DB values and API values can never drift apart.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
+from sqlalchemy import Enum as SQLEnum
+
+
+def pg_enum(enum_cls: Any, name: str, **kwargs: Any) -> SQLEnum:
+    """Create a PostgreSQL enum column using enum string values rather than member names."""
+    return SQLEnum(
+        enum_cls,
+        name=name,
+        values_callable=lambda x: [e.value for e in x],
+        **kwargs,
+    )
 
 
 class SourceType(StrEnum):

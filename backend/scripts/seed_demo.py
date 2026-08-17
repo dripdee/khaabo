@@ -257,11 +257,11 @@ async def create_reviews(city: City, restaurants: list[Restaurant]) -> int:
     return total
 
 
-def process_and_rank() -> dict:
-    """Run the real AI pipeline and the real ranking service over the demo reviews.
+async def process_and_rank() -> dict:
+    """Run AI extraction + ranking locally so the seeded data is immediately ranked.
 
-    Using the production code paths is the point: a demo that writes scores directly
-    would hide bugs in exactly the logic that matters.
+    Normally Celery handles this asynchronously. For a deterministic, instant demo
+    experience, we drain the pending queue in-process.
     """
     from app.services.ai_processing import claim_pending_reviews, process_review
     from app.services.ranking_service import recompute_pairs, recompute_trends
@@ -275,7 +275,7 @@ def process_and_rank() -> dict:
             if not batch:
                 break
             for review in batch:
-                result = asyncio.run(process_review(session, review))
+                result = await process_review(session, review)
                 pairs.update(result.pairs)
                 processed += 1
 
@@ -339,7 +339,7 @@ async def main() -> int:
         return 0
 
     print("Running AI extraction and ranking (this uses the real pipeline)...")
-    stats = process_and_rank()
+    stats = await process_and_rank()
     print(
         f"Processed {stats['processed']} reviews -> {stats['pairs']} dish/restaurant pairs "
         f"({stats['ranked']} ranked, {stats['insufficient']} insufficient), "

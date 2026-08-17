@@ -33,6 +33,35 @@ def upgrade() -> None:
     for ext in EXTENSIONS:
         op.execute(f'CREATE EXTENSION IF NOT EXISTS "{ext}"')
 
+    # If an earlier failed attempt created partial enum types with uppercase values,
+    # drop unused empty enums so create_all creates them cleanly with value-strings.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'bookmarks') THEN
+                DROP TYPE IF EXISTS bookmark_target CASCADE;
+                DROP TYPE IF EXISTS user_role CASCADE;
+                DROP TYPE IF EXISTS trend_direction CASCADE;
+                DROP TYPE IF EXISTS score_status CASCADE;
+                DROP TYPE IF EXISTS trend_subject CASCADE;
+                DROP TYPE IF EXISTS source_type CASCADE;
+                DROP TYPE IF EXISTS review_status CASCADE;
+                DROP TYPE IF EXISTS ai_state CASCADE;
+                DROP TYPE IF EXISTS value_signal CASCADE;
+                DROP TYPE IF EXISTS extraction_method CASCADE;
+                DROP TYPE IF EXISTS aspect_type CASCADE;
+                DROP TYPE IF EXISTS job_status CASCADE;
+                DROP TYPE IF EXISTS moderation_reason CASCADE;
+                DROP TYPE IF EXISTS moderation_status CASCADE;
+                DROP TYPE IF EXISTS conflict_kind CASCADE;
+                DROP TYPE IF EXISTS conflict_status CASCADE;
+                DROP TYPE IF EXISTS dish_category CASCADE;
+            END IF;
+        END $$;
+        """
+    )
+
     Base.metadata.create_all(bind=bind, checkfirst=True)
 
     # Trigram index on restaurant name for entity resolution is declared on the

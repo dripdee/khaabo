@@ -69,8 +69,15 @@ else
     echo "==> swap already present, skipping"
 fi
 
-# â”€â”€ Firewall â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— Firewall ————————————————————————————————————————————————————————————————
 echo "==> firewall (ufw)"
+# Oracle Cloud Ubuntu ships with default iptables REJECT rules that intercept
+# traffic before UFW. Flush the legacy rules so UFW has full control.
+iptables -P INPUT ACCEPT || true
+iptables -P FORWARD ACCEPT || true
+iptables -F INPUT || true
+iptables -F FORWARD || true
+
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing

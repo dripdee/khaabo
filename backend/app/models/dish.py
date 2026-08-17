@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDMixin
-from app.models.enums import DishCategory
+from app.models.enums import DishCategory, pg_enum
 
 
 class Dish(UUIDMixin, TimestampMixin, Base):
@@ -40,7 +40,7 @@ class Dish(UUIDMixin, TimestampMixin, Base):
     normalized_name: Mapped[str] = mapped_column(String(160), nullable=False)
     cuisine: Mapped[str | None] = mapped_column(String(80))
     category: Mapped[DishCategory] = mapped_column(
-        Enum(DishCategory, name="dish_category"), nullable=False, default=DishCategory.OTHER
+        pg_enum(DishCategory, name="dish_category"), nullable=False, default=DishCategory.OTHER
     )
     is_veg: Mapped[bool | None] = mapped_column(Boolean)
     description: Mapped[str | None] = mapped_column(Text)

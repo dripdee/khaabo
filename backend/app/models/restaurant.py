@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDMixin
-from app.models.enums import SourceType
+from app.models.enums import SourceType, pg_enum
 
 
 class City(UUIDMixin, TimestampMixin, Base):
@@ -126,7 +126,7 @@ class RestaurantSource(UUIDMixin, TimestampMixin, Base):
     restaurant_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("restaurants.id", ondelete="CASCADE"), nullable=False
     )
-    source: Mapped[SourceType] = mapped_column(Enum(SourceType, name="source_type"), nullable=False)
+    source: Mapped[SourceType] = mapped_column(pg_enum(SourceType, name="source_type"), nullable=False)
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
@@ -152,7 +152,7 @@ class RestaurantAlias(UUIDMixin, TimestampMixin, Base):
     alias: Mapped[str] = mapped_column(String(255), nullable=False)
     normalized_alias: Mapped[str] = mapped_column(String(255), nullable=False)
     source: Mapped[SourceType] = mapped_column(
-        Enum(SourceType, name="source_type"), nullable=False, default=SourceType.MANUAL
+        pg_enum(SourceType, name="source_type"), nullable=False, default=SourceType.MANUAL
     )
     confidence: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.8)
 

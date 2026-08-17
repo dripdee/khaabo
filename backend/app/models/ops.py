@@ -30,6 +30,7 @@ from app.models.enums import (
     ModerationReason,
     ModerationStatus,
     SourceType,
+    pg_enum,
 )
 
 
@@ -42,13 +43,13 @@ class IngestionJob(UUIDMixin, TimestampMixin, Base):
 
     __tablename__ = "ingestion_jobs"
 
-    source: Mapped[SourceType] = mapped_column(Enum(SourceType, name="source_type"), nullable=False)
+    source: Mapped[SourceType] = mapped_column(pg_enum(SourceType, name="source_type"), nullable=False)
     city_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("cities.id", ondelete="SET NULL")
     )
     job_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     status: Mapped[JobStatus] = mapped_column(
-        Enum(JobStatus, name="job_status"), nullable=False, default=JobStatus.QUEUED
+        pg_enum(JobStatus, name="job_status"), nullable=False, default=JobStatus.QUEUED
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
@@ -75,7 +76,7 @@ class AIProcessingJob(UUIDMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[JobStatus] = mapped_column(
-        Enum(JobStatus, name="job_status"), nullable=False, default=JobStatus.QUEUED
+        pg_enum(JobStatus, name="job_status"), nullable=False, default=JobStatus.QUEUED
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provider: Mapped[str | None] = mapped_column(String(60))
@@ -103,10 +104,10 @@ class ModerationQueueItem(UUIDMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False
     )
     reason: Mapped[ModerationReason] = mapped_column(
-        Enum(ModerationReason, name="moderation_reason"), nullable=False
+        pg_enum(ModerationReason, name="moderation_reason"), nullable=False
     )
     status: Mapped[ModerationStatus] = mapped_column(
-        Enum(ModerationStatus, name="moderation_status"),
+        pg_enum(ModerationStatus, name="moderation_status"),
         nullable=False,
         default=ModerationStatus.OPEN,
     )
@@ -137,7 +138,7 @@ class EntityConflict(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "entity_conflicts"
 
     kind: Mapped[ConflictKind] = mapped_column(
-        Enum(ConflictKind, name="conflict_kind"), nullable=False
+        pg_enum(ConflictKind, name="conflict_kind"), nullable=False
     )
     city_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("cities.id", ondelete="SET NULL")
@@ -147,7 +148,7 @@ class EntityConflict(UUIDMixin, TimestampMixin, Base):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     similarity: Mapped[float | None] = mapped_column(Numeric(5, 4))
     status: Mapped[ConflictStatus] = mapped_column(
-        Enum(ConflictStatus, name="conflict_status"), nullable=False, default=ConflictStatus.OPEN
+        pg_enum(ConflictStatus, name="conflict_status"), nullable=False, default=ConflictStatus.OPEN
     )
     auto_resolvable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     resolved_by: Mapped[uuid.UUID | None] = mapped_column(

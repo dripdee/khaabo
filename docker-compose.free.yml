@@ -78,11 +78,8 @@ services:
     # The image runs alembic on startup; `--proxy-headers` lets Caddy forward the
     # real client IP for rate-limiting. One uvicorn worker, not two — a 1GB VM
     # cannot keep two Python processes plus Celery alive without swap pressure.
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000
-             --workers 1 --proxy-headers --forwarded-allow-ips '*'"
-    ports:
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips '*'"
+    ports: !reset
       - "127.0.0.1:8000:8000"
     volumes: []
     # No depends_on: db/redis are external services reachable over the internet

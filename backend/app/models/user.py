@@ -24,7 +24,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDMixin
-from app.models.enums import BookmarkTarget, UserRole
+from app.models.enums import BookmarkTarget, UserRole, pg_enum
 
 
 class User(TimestampMixin, Base):
@@ -35,7 +35,7 @@ class User(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     email: Mapped[str | None] = mapped_column(String(320), unique=True)
     role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="user_role"), nullable=False, default=UserRole.USER
+        pg_enum(UserRole, name="user_role"), nullable=False, default=UserRole.USER
     )
     is_banned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -106,7 +106,7 @@ class Bookmark(UUIDMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("bookmark_collections.id", ondelete="SET NULL")
     )
     target_type: Mapped[BookmarkTarget] = mapped_column(
-        Enum(BookmarkTarget, name="bookmark_target"), nullable=False
+        pg_enum(BookmarkTarget, name="bookmark_target"), nullable=False
     )
     dish_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("dishes.id", ondelete="CASCADE")

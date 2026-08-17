@@ -41,8 +41,8 @@
 	redir @notbackend {$PAGES_URL}{uri} 308
 
 	# Rate-limit-friendly: don't let a crawler hammer /docs.
-	respond /robots.txt 200 {
-		body "User-agent: *\nDisallow: /\n"
-		Content-Type text/plain
+	handle /robots.txt {
+		header Content-Type text/plain
+		respond "User-agent: *\nDisallow: /\n" 200
 	}
 }
