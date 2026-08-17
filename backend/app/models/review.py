@@ -54,7 +54,9 @@ class Review(UUIDMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
 
-    source: Mapped[SourceType] = mapped_column(pg_enum(SourceType, name="source_type"), nullable=False)
+    source: Mapped[SourceType] = mapped_column(
+        pg_enum(SourceType, name="source_type"), nullable=False
+    )
     lang: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
     title: Mapped[str | None] = mapped_column(String(300))
     body: Mapped[str] = mapped_column(Text, nullable=False)
@@ -115,7 +117,9 @@ class ReviewSource(UUIDMixin, TimestampMixin, Base):
     review_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False
     )
-    source: Mapped[SourceType] = mapped_column(pg_enum(SourceType, name="source_type"), nullable=False)
+    source: Mapped[SourceType] = mapped_column(
+        pg_enum(SourceType, name="source_type"), nullable=False
+    )
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str | None] = mapped_column(Text)
     permalink: Mapped[str | None] = mapped_column(Text)
@@ -187,7 +191,9 @@ class ReviewAspect(UUIDMixin, TimestampMixin, Base):
     dish_mention_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("review_dish_mentions.id", ondelete="CASCADE")
     )
-    aspect: Mapped[AspectType] = mapped_column(pg_enum(AspectType, name="aspect_type"), nullable=False)
+    aspect: Mapped[AspectType] = mapped_column(
+        pg_enum(AspectType, name="aspect_type"), nullable=False
+    )
     sentiment: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False)
     confidence: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.5)
     snippet: Mapped[str | None] = mapped_column(String(320))

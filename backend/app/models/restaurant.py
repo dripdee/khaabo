@@ -125,7 +125,9 @@ class RestaurantSource(UUIDMixin, TimestampMixin, Base):
     restaurant_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("restaurants.id", ondelete="CASCADE"), nullable=False
     )
-    source: Mapped[SourceType] = mapped_column(pg_enum(SourceType, name="source_type"), nullable=False)
+    source: Mapped[SourceType] = mapped_column(
+        pg_enum(SourceType, name="source_type"), nullable=False
+    )
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

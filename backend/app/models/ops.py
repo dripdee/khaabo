@@ -42,7 +42,9 @@ class IngestionJob(UUIDMixin, TimestampMixin, Base):
 
     __tablename__ = "ingestion_jobs"
 
-    source: Mapped[SourceType] = mapped_column(pg_enum(SourceType, name="source_type"), nullable=False)
+    source: Mapped[SourceType] = mapped_column(
+        pg_enum(SourceType, name="source_type"), nullable=False
+    )
     city_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("cities.id", ondelete="SET NULL")
     )
