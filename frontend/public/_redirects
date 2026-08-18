@@ -1,0 +1,2 @@
+# SPA fallback (Cloudflare Pages): any unmatched route renders the app shell.
+/*  /index.html  200
