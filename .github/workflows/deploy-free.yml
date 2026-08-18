@@ -153,23 +153,43 @@ jobs:
           # The .env on the VM holds the production secrets. We never echo it
           # to avoid leaking values into Actions logs.
           script: |
+            set -e
             cd /opt/khaabo
             # Compose-file order matters: the free overlay overrides the base.
             DC="docker compose -f docker-compose.yml -f docker-compose.free.yml"
 
+            # GITHUB_* env vars only exist inside Actions — on the VM the compose
+            # default for the image org would silently fall back to the wrong
+            # name and `docker compose pull` would skip it. Pin the exact image
+            # we just pushed and make sure every service runs it.
+            export API_IMAGE="ghcr.io/${{ github.repository_owner }}/khaabo-backend:${DEPLOY_TAG}"
+            echo "Deploying image: $API_IMAGE"
+
             # Login to GHCR so the VM can pull the image we just pushed.
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
 
-            $DC pull api worker beat caddy
+            # caddy is built locally (no registry image) — pull everything else.
+            $DC pull api worker beat
+
+            # Hard-fail if the pull did not land the image we pushed.
+            docker image inspect "$API_IMAGE" >/dev/null || { echo "::error::image $API_IMAGE missing after pull"; exit 1; }
 
             # Run migrations as a one-shot before rolling the API.
             $DC run --rm --no-deps api alembic upgrade head
 
-            # Roll worker/beat first (they tolerate a brief overlap with the old
-            # API version because the schema only moves forward), then api/caddy.
-            $DC up -d worker beat
+            # Roll everything off the old image. --force-recreate + --pull protect
+            # against config drift on the VM.
+            $DC up -d --force-recreate worker beat
             sleep 5
-            $DC up -d api caddy
+            $DC up -d --force-recreate api
+            $DC up -d caddy
+
+            # Belt-and-braces: every service must run the exact pushed digest.
+            WANT=$(docker image inspect -f '{{.Id}}' "$API_IMAGE")
+            for s in api worker beat; do
+              GOT=$(docker inspect -f '{{.Image}}' "khaabo-$s-1")
+              [ "$GOT" = "$WANT" ] || { echo "::error::$s runs $GOT, expected $WANT"; exit 1; }
+            done
 
             docker image prune -f
 
