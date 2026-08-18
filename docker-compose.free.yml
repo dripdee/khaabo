@@ -67,6 +67,11 @@ services:
     profiles: ["local-only"]
   redis:
     profiles: ["local-only"]
+  # The SPA lives on Cloudflare (Workers static assets), not on this VM. The
+  # `web` container only exists in the dev/full-stack layout; skip it on the
+  # free-tier VM to save RAM and to avoid the stale `./frontend:/app` bind mount.
+  web:
+    profiles: ["local-only"]
 
   api:
     image: ${API_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER:-khaabo}/khaabo-backend:latest}
@@ -81,7 +86,10 @@ services:
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips '*'"
     ports: !reset
       - "127.0.0.1:8000:8000"
-    volumes: []
+    # `volumes: []` alone does NOT clear the base's `./backend:/app` bind mount —
+    # compose merges sequences, so the dev mount leaked through and shadowed the
+    # GHCR image code. `!reset` is required to wipe inherited arrays.
+    volumes: !reset []
     # No depends_on: db/redis are external services reachable over the internet
     # from the VM; the app itself re-tries stale pools with `pool_pre_ping`.
     # `!reset []` is the compose way to override an inherited array.
@@ -105,7 +113,7 @@ services:
       --loglevel=warning
       --concurrency=1
       -Q ingestion,ai_processing,ranking,summarization
-    volumes: []
+    volumes: !reset []  # see api: wipe the inherited dev bind mount
     depends_on: !reset []  # external Upstash Redis — no local service to wait on
     # The base image healthcheck curls localhost:8000 (API-only). For the
     # worker, ask it to ping itself over the broker instead.
@@ -130,7 +138,7 @@ services:
       target: prod
     environment: *api-env
     command: celery -A app.workers.celery_app beat --loglevel=warning
-    volumes: []
+    volumes: !reset []
     depends_on: !reset []
     # Beat has no RPC endpoint; verify it's alive and maintaining its schedule db.
     healthcheck:

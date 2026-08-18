@@ -55,7 +55,7 @@ services:
       POSTGRES_USER: ${DB_USER:-khaabo}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
       POSTGRES_DB: ${DB_NAME:-khaabo}
-    ports: []
+    ports: !reset []  # wipe inherited host ports — DB only reachable on the docker network
     restart: always
     logging: *default-logging
     deploy:
@@ -75,7 +75,10 @@ services:
              --workers 2 --proxy-headers --forwarded-allow-ips '*'"
     ports:
       - "127.0.0.1:8000:8000"
-    volumes: []
+    # `volumes: []` alone leaked the base `./backend:/app` bind mount (compose
+    # merges sequences); `!reset` is required to wipe inherited arrays so the
+    # image is the source of truth.
+    volumes: !reset []
     depends_on:
       db:
         condition: service_healthy
@@ -99,7 +102,7 @@ services:
       --loglevel=warning
       --concurrency=${CELERY_CONCURRENCY:-2}
       -Q ingestion,ai_processing,ranking,summarization
-    volumes: []
+    volumes: !reset []
     depends_on:
       db:
         condition: service_healthy
@@ -127,7 +130,7 @@ services:
       target: prod
     environment: *api-env
     command: celery -A app.workers.celery_app beat --loglevel=warning
-    volumes: []
+    volumes: !reset []
     depends_on:
       redis:
         condition: service_healthy
@@ -155,8 +158,8 @@ services:
         VITE_SUPABASE_URL: ${SUPABASE_URL:-}
         VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
         VITE_DEFAULT_CITY: ${VITE_DEFAULT_CITY:-kolkata}
-    ports: []
-    volumes: []
+    ports: !reset []  # nginx lives inside the container; caddy on the edge
+    volumes: !reset []
     depends_on:
       - api
     restart: always
