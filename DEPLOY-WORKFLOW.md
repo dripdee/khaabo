@@ -86,8 +86,8 @@ git push origin main
 - Builds backend image → GHCR (`latest` + `production` tags)
 - SSHes to the VM: `docker compose pull` → pins the exact pushed image →
   `alembic upgrade head` → `up -d --force-recreate` for worker/beat/api →
-  verifies every container runs the pushed image digest → health-checks
-  `localhost:8000/api/v1/health` → fails loudly on any mismatch
+  verifies every container runs the pushed image digest → polls the api
+  container's healthcheck until `healthy` → fails loudly on any mismatch
 
 The *Deploy to Oracle VM* job uses the `production` environment — if
 "Required reviewers" is set, approve it in the Actions tab.

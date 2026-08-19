@@ -154,10 +154,10 @@ jobs:
             docker image prune -f
 
             # Smoke test: wait for the api container to report healthy (its
-            # healthcheck curls localhost:8000 *inside* the container, so it
-            # works even if the host port binding were ever wrong), then
-            # verify the host binding too. Startup runs alembic + uvicorn; on
-            # a 1GB VM that takes up to ~60s, so poll generously.
+            # healthcheck curls localhost:8000 *inside* the container; the VM
+            # has no host port binding by design — caddy proxies api:8000 over
+            # the docker network). Startup runs alembic + uvicorn; on a 1GB VM
+            # that takes up to ~60s, so poll generously.
             OK=0
             for i in $(seq 1 30); do
               STATE=$(docker inspect -f '{{.State.Health.Status}}' khaabo-api-1 2>/dev/null)
@@ -170,6 +170,6 @@ jobs:
               docker logs --tail=40 khaabo-api-1 2>&1 || true
               exit 1
             }
-            curl -fsS http://localhost:8000/api/v1/health | grep -q '"status"' \
-              || { echo "::error::API healthy in-container but host port 8000 refused"; exit 1; }
+            $DC exec -T api curl -fsS http://localhost:8000/api/v1/health | grep -q '"status"' \
+              || { echo "::error::API container healthy but health endpoint misbehaving"; exit 1; }
             echo "✅ deployed backend"
