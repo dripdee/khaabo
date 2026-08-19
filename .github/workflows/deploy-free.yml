@@ -153,16 +153,23 @@ jobs:
 
             docker image prune -f
 
-            # Smoke test: the API must report 'status' (ok or degraded).
-            # The image runs alembic + uvicorn on start; on a 1GB VM that can
-            # take ~40s when the pool is cold, so poll instead of one-shot curl.
+            # Smoke test: wait for the api container to report healthy (its
+            # healthcheck curls localhost:8000 *inside* the container, so it
+            # works even if the host port binding were ever wrong), then
+            # verify the host binding too. Startup runs alembic + uvicorn; on
+            # a 1GB VM that takes up to ~60s, so poll generously.
             OK=0
-            for i in $(seq 1 12); do
-              if curl -fsS http://localhost:8000/api/v1/health 2>/dev/null | grep -q '"status"'; then
-                OK=1; break
-              fi
-              echo "waiting for API health (attempt $i/12)..."
+            for i in $(seq 1 30); do
+              STATE=$(docker inspect -f '{{.State.Health.Status}}' khaabo-api-1 2>/dev/null)
+              if [ "$STATE" = "healthy" ]; then OK=1; break; fi
+              echo "waiting for api health (attempt $i/30, state=${STATE:-unknown})..."
               sleep 5
             done
-            [ "$OK" = "1" ] || { echo "::error::API never became healthy"; exit 1; }
+            [ "$OK" = "1" ] || {
+              echo "::error::API never became healthy"
+              docker logs --tail=40 khaabo-api-1 2>&1 || true
+              exit 1
+            }
+            curl -fsS http://localhost:8000/api/v1/health | grep -q '"status"' \
+              || { echo "::error::API healthy in-container but host port 8000 refused"; exit 1; }
             echo "✅ deployed backend"

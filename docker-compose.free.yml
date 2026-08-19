@@ -84,8 +84,9 @@ services:
     # real client IP for rate-limiting. One uvicorn worker, not two — a 1GB VM
     # cannot keep two Python processes plus Celery alive without swap pressure.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips '*'"
-    ports: !reset
-      - "127.0.0.1:8000:8000"
+    # `!reset` must stay inline — a block sequence after the tag silently
+    # drops every entry, leaving the api container with no host port binding.
+    ports: !reset ["127.0.0.1:8000:8000"]
     # `volumes: []` alone does NOT clear the base's `./backend:/app` bind mount —
     # compose merges sequences, so the dev mount leaked through and shadowed the
     # GHCR image code. `!reset` is required to wipe inherited arrays.
