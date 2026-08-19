@@ -154,6 +154,15 @@ jobs:
             docker image prune -f
 
             # Smoke test: the API must report 'status' (ok or degraded).
-            sleep 10
-            curl -fsS http://localhost:8000/api/v1/health | grep -q '"status"'
+            # The image runs alembic + uvicorn on start; on a 1GB VM that can
+            # take ~40s when the pool is cold, so poll instead of one-shot curl.
+            OK=0
+            for i in $(seq 1 12); do
+              if curl -fsS http://localhost:8000/api/v1/health 2>/dev/null | grep -q '"status"'; then
+                OK=1; break
+              fi
+              echo "waiting for API health (attempt $i/12)..."
+              sleep 5
+            done
+            [ "$OK" = "1" ] || { echo "::error::API never became healthy"; exit 1; }
             echo "✅ deployed backend"
