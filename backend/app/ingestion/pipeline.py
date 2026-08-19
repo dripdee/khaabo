@@ -37,6 +37,7 @@ from app.services.entity_resolution import (
     MatchMethod,
     resolve_candidate,
 )
+from app.services.mention_extraction import resolve_mention
 from app.services.ranking import source_quality_for
 from app.utils.text import clean_text, content_hash, normalize_name, slugify
 
@@ -302,7 +303,7 @@ def store_review(
 
     target = restaurant
     if target is None:
-        target = _resolve_review_restaurant(session, city, raw, candidates)
+        target = _resolve_review_restaurant(session, city, raw, candidates, body)
     if target is None:
         return None, "skipped"
 
@@ -351,42 +352,68 @@ def _resolve_review_restaurant(
     city: City,
     raw: RawReview,
     candidates: list[CandidateRestaurant] | None,
+    body: str,
 ) -> Restaurant | None:
     """A text-only source names a place; resolve it or drop the item.
 
     Dropping is correct: evidence attached to the wrong restaurant is worse than no
     evidence, and unresolved names would silently distort rankings.
+
+    Two layers:
+    1. A structured `restaurant_hint` is resolved by name against the catalog with
+       the resolver's exact-bar (>= 0.9 confidence).
+    2. No hint (or a hint that cannot reach the bar without coordinates) falls back
+       to the prose itself via mention extraction: a review that names exactly one
+       catalog restaurant — name or alias, word-bounded — is evidence for that
+       place. Zero or multiple names stay dropped, because choosing among them
+       would be a guess.
     """
-    if not raw.restaurant_hint:
-        return None
-
     candidates = candidates if candidates is not None else load_candidates(session, city.id)
-    resolution = resolve_candidate(
-        IncomingPlace(
-            name=raw.restaurant_hint,
-            lat=raw.lat,
-            lng=raw.lng,
-            source=raw.source.value,
-            external_id=None,
-        ),
-        candidates,
-    )
 
-    if resolution.matched_id and resolution.confidence >= 0.9:
-        return session.get(Restaurant, uuid.UUID(resolution.matched_id))
-
-    if resolution.needs_review:
-        session.add(
-            EntityConflict(
-                kind=ConflictKind.RESTAURANT,
-                city_id=city.id,
-                candidate_a=uuid.UUID(resolution.matched_id) if resolution.matched_id else None,
-                candidate_b=uuid.UUID(resolution.runner_up_id) if resolution.runner_up_id else None,
-                similarity=resolution.similarity,
-                payload={
-                    "incoming": {"name": raw.restaurant_hint, "source": raw.source.value},
-                    "reason": "unresolved_review_mention",
-                },
-            )
+    if raw.restaurant_hint:
+        resolution = resolve_candidate(
+            IncomingPlace(
+                name=raw.restaurant_hint,
+                lat=raw.lat,
+                lng=raw.lng,
+                source=raw.source.value,
+                external_id=None,
+            ),
+            candidates,
         )
-    return None
+
+        if resolution.matched_id and resolution.confidence >= 0.9:
+            restaurant = session.get(Restaurant, uuid.UUID(resolution.matched_id))
+            if restaurant is not None and normalize_name(raw.restaurant_hint) != (
+                restaurant.normalized_name
+            ):
+                # The hint string often spells the place differently from its
+                # canonical name ("Arsalan Park Circus" -> "Arsalan"); remember it
+                # so future mentions hit the alias path directly.
+                _add_alias(session, restaurant, raw.restaurant_hint, raw.source)
+            return restaurant
+
+        if resolution.needs_review:
+            session.add(
+                EntityConflict(
+                    kind=ConflictKind.RESTAURANT,
+                    city_id=city.id,
+                    candidate_a=(
+                        uuid.UUID(resolution.matched_id) if resolution.matched_id else None
+                    ),
+                    candidate_b=(
+                        uuid.UUID(resolution.runner_up_id) if resolution.runner_up_id else None
+                    ),
+                    similarity=resolution.similarity,
+                    payload={
+                        "incoming": {"name": raw.restaurant_hint, "source": raw.source.value},
+                        "reason": "unresolved_review_mention",
+                    },
+                )
+            )
+            return None
+
+    restaurant_id, _label = resolve_mention(body, candidates)
+    if restaurant_id is None:
+        return None
+    return session.get(Restaurant, uuid.UUID(restaurant_id))

@@ -135,8 +135,15 @@ def discover_places(self, city_slug: str | None = None) -> dict:
 
 
 @celery_app.task(name="ingestion.fetch_reviews", bind=True, **RETRY_KWARGS)
-def fetch_reviews(self, source: str, city_slug: str | None = None) -> dict:
-    """Fetch text evidence from a source, then hand off to AI processing."""
+def fetch_reviews(
+    self, source: str, city_slug: str | None = None, lookback_days: int | None = None
+) -> dict:
+    """Fetch text evidence from a source, then hand off to AI processing.
+
+    `lookback_days` overrides the incremental cursor for one-off backfills
+    (e.g. re-processing past YouTube videos after the matcher improves);
+    dedupe on `(source, external_id)` and content hash keeps it safe.
+    """
     from app.workers.ai_tasks import process_pending
 
     source_type = SourceType(source)
@@ -162,6 +169,8 @@ def fetch_reviews(self, source: str, city_slug: str | None = None) -> dict:
             counters = IngestCounters()
             try:
                 since = _last_success_at(session, source_type, city)
+                if lookback_days is not None:
+                    since = datetime.now(UTC) - timedelta(days=lookback_days)
                 raw_reviews = asyncio.run(adapter.fetch_reviews(city_ref(city), since))
                 counters.seen = len(raw_reviews)
                 candidates = load_candidates(session, city.id)
@@ -225,6 +234,33 @@ def _last_success_at(session, source: SourceType, city: City) -> datetime | None
     if row is None:
         return datetime.now(UTC) - timedelta(days=90)
     return row - timedelta(hours=2)  # small overlap so nothing is missed at the seam
+
+
+@celery_app.task(name="ingestion.enrich_aliases")
+def enrich_aliases(city_slug: str | None = None, create: bool = False) -> dict:
+    """Weekly Wikidata enrichment: fresh aliases for the catalog.
+
+    No `job_key` claim on purpose — the enricher is idempotent (alias rows are
+    unique per normalized name, repeat places are skipped via their
+    `wikidata:<id>` source row), so an overlapping tick is harmless.
+    """
+    from scripts.enrich_aliases import enrich_city
+
+    totals: dict[str, dict] = {}
+    with sync_session() as session:
+        cities = (
+            [c for c in _active_cities(session) if c.slug == city_slug]
+            if city_slug
+            else _active_cities(session)
+        )
+
+    for city in cities:
+        try:
+            totals[city.slug] = enrich_city(city, create=create)
+        except Exception as exc:  # noqa: BLE001 - report per-city, keep crawling
+            totals[city.slug] = {"error": str(exc)[:500]}
+            log.error("enrich_aliases_failed", city=city.slug, error=str(exc))
+    return totals
 
 
 @shared_task(name="ingestion.prune_jobs")

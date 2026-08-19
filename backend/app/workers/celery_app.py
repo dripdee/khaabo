@@ -108,4 +108,8 @@ celery_app.conf.beat_schedule = {
         "task": "ingestion.prune_jobs",
         "schedule": crontab(minute=0, hour=1),
     },
+    "enrich-aliases": {
+        "task": "ingestion.enrich_aliases",
+        "schedule": crontab(minute=0, hour=3, day_of_week=1),  # weekly, Monday 03:00 UTC
+    },
 }
