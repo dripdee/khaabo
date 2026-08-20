@@ -100,7 +100,7 @@ def discover_places(self, city_slug: str | None = None) -> dict:
                 candidates = load_candidates(session, city.id)
                 counters.seen = len(places)
 
-                for place in places:
+                for i, place in enumerate(places, 1):
                     _, action = upsert_place(session, city, place, candidates=candidates)
                     if action == "created":
                         counters.created += 1
@@ -114,6 +114,11 @@ def discover_places(self, city_slug: str | None = None) -> dict:
                         counters.skipped += 1
                     else:
                         counters.skipped += 1
+                    # Chunked commits: Supabase's statement timeout kills a
+                    # whole-city insert inside one long transaction.
+                    if i % 100 == 0:
+                        session.commit()
+                session.commit()
 
                 _finish_job(job, counters, JobStatus.SUCCESS)
                 totals[city.slug] = {
