@@ -92,6 +92,10 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute=35, hour=f"*/{settings.source_interval_youtube_hours}"),
         "kwargs": {"source": "youtube"},
     },
+    "fetch-youtube-comments": {
+        "task": "ingestion.fetch_youtube_comments",
+        "schedule": crontab(minute=50, hour="*/6"),
+    },
     "process-pending-ai": {
         "task": "ai.process_pending",
         "schedule": crontab(minute="*/15"),  # user reviews pick up within 15 min;

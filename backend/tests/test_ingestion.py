@@ -9,14 +9,23 @@ a scheduled job.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
+from app.core.errors import TransientSourceError
 from app.ingestion.base import CityRef
 from app.ingestion.osm import OSM_ATTRIBUTION, OverpassAdapter, build_overpass_query
 from app.ingestion.reddit import RedditAdapter
 from app.ingestion.registry import enabled_adapters, get_adapter, interval_hours
-from app.ingestion.youtube import COST_SEARCH, COST_VIDEOS, QuotaGuard, YouTubeAdapter
+from app.ingestion.youtube import (
+    COST_COMMENTS,
+    COST_SEARCH,
+    COST_VIDEOS,
+    QuotaGuard,
+    YouTubeAdapter,
+)
 from app.models.enums import SourceType
 from app.utils.text import clean_text, content_hash, extract_prices, normalize_name, slugify
 
@@ -364,6 +373,225 @@ class TestQuotaGuard:
         guard must be re-derived."""
         assert COST_SEARCH == 100
         assert COST_VIDEOS == 1
+
+
+def _comment_item(comment_id: str, *, text: str, likes: int = 5, **overrides) -> dict:
+    """A commentThreads.list item as the YouTube API returns it, with optional
+    field overrides so individual shapes (`updatedAt`, missing snippets) can be
+    exercised without hand-writing the nesting."""
+    snippet = {
+        "textDisplay": text,
+        "authorDisplayName": "HungryHuman",
+        "publishedAt": "2025-05-01T12:00:00Z",
+        "updatedAt": "2025-05-02T12:00:00Z",
+        "likeCount": likes,
+    }
+    snippet.update(overrides)
+    return {"id": comment_id, "snippet": {"topLevelComment": {"snippet": snippet}}}
+
+
+class _FakeYouTubeClient:
+    """httpx.AsyncClient stand-in that routes GET /commentThreads per videoId.
+
+    Each value of the route dict is a payload to return as JSON, an
+    `httpx.Response` to return verbatim (for 403 plumbing), or an
+    `httpx.HTTPError` to raise from the transport. Unknown video ids raise a
+    transport error so a misconfigured test fails loudly rather than silently
+    passing with an empty payload.
+    """
+
+    def __init__(self, routes: dict[str, object]) -> None:
+        self._routes = routes
+        self.requested: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def request(self, method, url, *, headers=None, params=None):
+        params = params or {}
+        self.requested.append(dict(params))
+
+        route = self._routes.get(params.get("videoId"))
+        if isinstance(route, httpx.HTTPError):
+            raise route
+        if route is None:
+            raise httpx.ConnectError(f"no route for video {params.get('videoId')!r}")
+
+        fake_request = httpx.Request("GET", "https://youtube.test/commentThreads")
+        if isinstance(route, httpx.Response):
+            return route
+        return httpx.Response(200, json=route, request=fake_request)
+
+
+def _patch_youtube_client(monkeypatch, routes: dict[str, object]) -> _FakeYouTubeClient:
+    client = _FakeYouTubeClient(routes)
+    monkeypatch.setattr(
+        "app.ingestion.youtube.httpx.AsyncClient",
+        lambda **kwargs: client,
+    )
+    return client
+
+
+class TestYouTubeComments:
+    """Comment-thread ingestion: 1 unit per call for up to 100 comments. The
+    parent video is already city-verified, so the adapter must not re-gate on
+    city text — only on comment length. A 403 means comments are disabled on
+    that video and must be skipped, not treated as a hard failure."""
+
+    def setup_method(self):
+        self.adapter = YouTubeAdapter()
+        self.adapter.quota = AsyncMock()
+        self.adapter.quota.reserve = AsyncMock(return_value=True)
+        self.adapter.quota.refund = AsyncMock()
+        self.adapter.quota.spent = AsyncMock(return_value=0)
+
+    def _configured(self, monkeypatch):
+        monkeypatch.setattr("app.ingestion.youtube.settings.youtube_api_key", "test-key")
+
+    async def test_unconfigured_adapter_returns_nothing(self):
+        assert self.adapter.configured is False
+        assert await self.adapter.fetch_comments_for_videos(["v1"], KOLKATA) == []
+        self.adapter.quota.reserve.assert_not_awaited()
+
+    async def test_comment_becomes_a_review_with_expected_fields(self, monkeypatch):
+        self._configured(monkeypatch)
+        payload = {
+            "items": [
+                _comment_item("c1", text="This biryani changed my life, I'm serious", likes=42)
+            ]
+        }
+        _patch_youtube_client(monkeypatch, {"v1": payload})
+
+        reviews = await self.adapter.fetch_comments_for_videos(["v1"], KOLKATA)
+
+        assert len(reviews) == 1
+        r = reviews[0]
+        assert r.source is SourceType.YOUTUBE
+        assert r.external_id == "yt:v1#c:c1"
+        assert "#c:" in r.external_id
+        assert r.engagement == 42
+        assert r.author == "HungryHuman"
+        assert r.url == "https://www.youtube.com/watch?v=v1"
+        assert r.license == "youtube-api-tos"
+        assert "YouTube" in (r.attribution or "")
+        assert r.raw == {"video_id": "v1", "comment_id": "c1"}
+        assert r.restaurant_hint is None  # prose gates are handled downstream
+
+    async def test_published_at_falls_back_to_updated_at(self, monkeypatch):
+        """Some comments carry only `updatedAt`; the DTO must still parse."""
+        self._configured(monkeypatch)
+        payload = {
+            "items": [
+                _comment_item(
+                    "c2",
+                    text="I detour across the city for this roll, always fresh",
+                    publishedAt=None,
+                )
+            ]
+        }
+        _patch_youtube_client(monkeypatch, {"v1": payload})
+
+        reviews = await self.adapter.fetch_comments_for_videos(["v1"], KOLKATA)
+
+        assert reviews[0].published_at == datetime(2025, 5, 2, 12, tzinfo=UTC)
+
+    async def test_short_comments_are_filtered(self, monkeypatch):
+        """Anything under MIN_TEXT_LENGTH is chit-chat, not evidence."""
+        self._configured(monkeypatch)
+        payload = {
+            "items": [
+                _comment_item("short", text="lol nice"),
+                _comment_item(
+                    "long", text="The phuchka here is genuinely the best I've had this year"
+                ),
+            ]
+        }
+        _patch_youtube_client(monkeypatch, {"v1": payload})
+
+        reviews = await self.adapter.fetch_comments_for_videos(["v1"], KOLKATA)
+
+        assert [r.external_id for r in reviews] == ["yt:v1#c:long"]
+
+    async def test_comments_disabled_video_is_skipped_not_fatal(self, monkeypatch):
+        """A 403 means comments are disabled on that video: skip it and keep
+        the run alive. The reserved unit is refunded, and the next video is
+        still fetched."""
+        self._configured(monkeypatch)
+        fake_request = httpx.Request("GET", "https://youtube.test/commentThreads")
+        payload_v2 = {
+            "items": [
+                _comment_item("cz", text="Second video actually has a really great comment here")
+            ]
+        }
+        _patch_youtube_client(
+            monkeypatch,
+            {
+                "v1": httpx.Response(403, request=fake_request),
+                "v2": payload_v2,
+            },
+        )
+
+        reviews = await self.adapter.fetch_comments_for_videos(["v1", "v2"], KOLKATA)
+
+        assert [r.external_id for r in reviews] == ["yt:v2#c:cz"]
+        # The 403 call still reached YouTube (1 unit billed), so it is NOT
+        # refunded — only failed calls are. Both videos reserved one unit each.
+        assert self.adapter.quota.reserve.await_count == 2
+        self.adapter.quota.refund.assert_not_awaited()
+
+    async def test_quota_refusal_mid_run_returns_partial(self, monkeypatch):
+        """A refused reservation stops the run with what was collected so far,
+        and no API call is issued for the video that was denied."""
+        self._configured(monkeypatch)
+        self.adapter.quota.reserve = AsyncMock(side_effect=[True, False])
+        payload = {
+            "items": [
+                _comment_item(
+                    "c1", text="A long, tasty comment about the phuchka at this exact stall"
+                )
+            ]
+        }
+        client = _patch_youtube_client(monkeypatch, {"v1": payload})
+
+        reviews = await self.adapter.fetch_comments_for_videos(["v1", "v2"], KOLKATA)
+
+        assert [r.external_id for r in reviews] == ["yt:v1#c:c1"]
+        assert self.adapter.quota.reserve.await_count == 2
+        # Only one API call was made: v2 was refused before touching the network.
+        assert [p.get("videoId") for p in client.requested] == ["v1"]
+
+    async def test_request_error_refunds_the_reservation(self, monkeypatch):
+        """A transient 5xx/timeout must refund the unit and surface the error as
+        a `TransientSourceError` so Celery can back off and retry."""
+        self._configured(monkeypatch)
+        _patch_youtube_client(monkeypatch, {"v1": httpx.ConnectTimeout("slow")})
+
+        with pytest.raises(TransientSourceError):
+            await self.adapter.fetch_comments_for_videos(["v1"], KOLKATA)
+
+        assert self.adapter.quota.refund.await_count == 1
+        self.adapter.quota.refund.assert_awaited_with(COST_COMMENTS)
+
+    async def test_permanent_error_refunds_and_halts(self, monkeypatch):
+        """A non-403 client failure (e.g. 404) surfaces as PermanentSourceError,
+        refunding the reserved unit and halting the run — it is not the
+        commentsDisabled skip path."""
+        self._configured(monkeypatch)
+        fake_request = httpx.Request("GET", "https://youtube.test/commentThreads")
+        _patch_youtube_client(
+            monkeypatch, {"v1": httpx.Response(404, request=fake_request, text="Not Found")}
+        )
+
+        from app.core.errors import PermanentSourceError
+
+        with pytest.raises(PermanentSourceError):
+            await self.adapter.fetch_comments_for_videos(["v1"], KOLKATA)
+
+        assert self.adapter.quota.refund.await_count == 1
+        self.adapter.quota.refund.assert_awaited_with(COST_COMMENTS)
 
 
 class TestRegistry:

@@ -143,7 +143,10 @@ async def request_json(
         )
 
     if response.status_code in {401, 403}:
-        raise PermanentSourceError(f"{url} rejected credentials ({response.status_code})")
+        raise PermanentSourceError(
+            f"{url} rejected credentials ({response.status_code})",
+            details={"status": response.status_code},
+        )
 
     if response.status_code >= 400:
         raise PermanentSourceError(f"{url} returned {response.status_code}: {response.text[:200]}")

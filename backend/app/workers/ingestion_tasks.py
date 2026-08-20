@@ -26,7 +26,7 @@ from app.ingestion.pipeline import (
     upsert_place,
 )
 from app.ingestion.registry import get_adapter, interval_hours
-from app.models import City, IngestionJob, Review
+from app.models import City, IngestionJob, Review, ReviewSource
 from app.models.enums import JobStatus, SourceType
 from app.workers.celery_app import celery_app
 
@@ -41,15 +41,32 @@ RETRY_KWARGS = {
 }
 
 
-def _job_key(source: str, city_slug: str, interval: int) -> str:
-    """Bucket the clock by the source's interval so re-ticks collapse."""
+def _job_key(source: str, city_slug: str, interval: int, kind: str | None = None) -> str:
+    """Bucket the clock by the source's interval so re-ticks collapse.
+
+    `kind` separates sibling jobs on the same source (video fetch vs. comment
+    fetch) that share one unique-key bucket otherwise.
+    """
     now = datetime.now(UTC)
     bucket_hour = (now.hour // max(1, interval)) * max(1, interval)
-    return f"{source}:{city_slug}:{now:%Y-%m-%d}T{bucket_hour:02d}"
+    key = f"{source}:{city_slug}:{now:%Y-%m-%d}T{bucket_hour:02d}"
+    return f"{key}:{kind}" if kind else key
 
 
-def _claim_job(session, source: SourceType, city: City, params: dict) -> IngestionJob | None:
-    key = _job_key(source.value, city.slug, interval_hours(source))
+def _claim_job(
+    session,
+    source: SourceType,
+    city: City,
+    params: dict,
+    kind: str | None = None,
+    interval: int | None = None,
+) -> IngestionJob | None:
+    key = _job_key(
+        source.value,
+        city.slug,
+        interval if interval is not None else interval_hours(source),
+        kind,
+    )
     job = IngestionJob(
         source=source,
         city_id=city.id,
@@ -207,6 +224,162 @@ def fetch_reviews(
         process_pending.delay()
 
     return totals
+
+
+MAX_COMMENT_VIDEOS_PER_RUN = 25
+
+
+@celery_app.task(name="ingestion.fetch_youtube_comments", bind=True, **RETRY_KWARGS)
+def fetch_youtube_comments(self, city_slug: str | None = None) -> dict:
+    """Comment threads for already-stored YouTube videos, per city.
+
+    `commentThreads.list` costs 1 unit for up to 100 comments, so this is the
+    cheap way to multiply evidence per quota unit. Videos are taken from the
+    dedup table (`review_sources`) and every city run claims its own job_key
+    (`kind: comments` in params) so a duplicate beat tick cannot double-fetch.
+    Commits happen per video so one slow statement cannot murder the txn.
+    """
+    from app.workers.ai_tasks import process_pending
+
+    totals: dict[str, dict] = {}
+
+    with sync_session() as session:
+        adapter = get_adapter(SourceType.YOUTUBE)
+        if not adapter.enabled:
+            return {"status": "disabled", "source": "youtube"}
+
+        cities = (
+            [c for c in _active_cities(session) if c.slug == city_slug]
+            if city_slug
+            else _active_cities(session)
+        )
+
+        for city in cities:
+            video_ids = _pending_comment_videos(session, city.id)
+            if not video_ids:
+                continue
+
+            job = _claim_job(
+                session,
+                SourceType.YOUTUBE,
+                city,
+                {"kind": "comments"},
+                kind="comments",
+                interval=6,  # match the beat cadence so each 6 h tick is one run
+            )
+            if job is None:
+                totals[city.slug] = {"status": "skipped_duplicate"}
+                continue
+
+            counters = IngestCounters()
+            try:
+                candidates = load_candidates(session, city.id)
+                # The adapter reserves one quota unit per video and stops the
+                # whole run if the daily budget runs out mid-way.
+                raw_reviews = asyncio.run(
+                    adapter.fetch_comments_for_videos(video_ids, city_ref(city))
+                )
+                counters.seen = len(raw_reviews)
+
+                by_video: dict[str, list] = {}
+                for raw in raw_reviews:
+                    by_video.setdefault(raw.raw.get("video_id"), []).append(raw)
+
+                # Dedupe order follows the fetch order so a partial (quota-cut)
+                # run stores the oldest-vintage videos first.
+                for video_id in video_ids:
+                    for raw in by_video.get(video_id, []):
+                        review, action = store_review(session, city, raw, candidates=candidates)
+                        if action == "created":
+                            counters.created += 1
+                            if review is not None:
+                                counters.review_ids.append(str(review.id))
+                        else:
+                            counters.skipped += 1
+
+                    # Chunked commits: Supabase's statement timeout kills long txns.
+                    session.commit()
+
+                _finish_job(job, counters, JobStatus.SUCCESS)
+                session.commit()
+                totals[city.slug] = {
+                    "videos": len(video_ids),
+                    "seen": counters.seen,
+                    "created": counters.created,
+                    "skipped": counters.skipped,
+                }
+                log.info(
+                    "youtube_comments_ingested",
+                    city=city.slug,
+                    videos=len(video_ids),
+                    seen=counters.seen,
+                    created=counters.created,
+                    skipped=counters.skipped,
+                )
+            except PermanentSourceError as exc:
+                _finish_job(job, counters, JobStatus.FAILED, str(exc))
+                log.error("fetch_youtube_comments_permanent_failure", error=str(exc))
+            except TransientSourceError as exc:
+                _finish_job(job, counters, JobStatus.FAILED, str(exc))
+                session.commit()
+                raise self.retry(exc=exc) from exc
+
+    if any(v.get("created") for v in totals.values() if isinstance(v, dict)):
+        process_pending.delay()
+
+    return totals
+
+
+def _pending_comment_videos(session, city_id) -> list[str]:
+    """Video ids with evidence stored for this city but no comment rows yet.
+
+    `review_sources` carries no city column, so the join goes through `reviews`.
+    Oldest source rows are considered first so repeated runs work through the
+    backlog, MAX_COMMENT_VIDEOS_PER_RUN at a time.
+    """
+    rows = (
+        session.execute(
+            select(ReviewSource.external_id)
+            .join(Review, ReviewSource.review_id == Review.id)
+            .where(
+                Review.city_id == city_id,
+                ReviewSource.source == SourceType.YOUTUBE,
+                ReviewSource.external_id.like("yt:%"),
+                ReviewSource.external_id.notlike("yt:%#c:%"),
+            )
+            .order_by(ReviewSource.created_at)
+        )
+        .scalars()
+        .all()
+    )
+
+    seen: set[str] = set()
+    video_ids: list[str] = []
+    for eid in rows:
+        vid = eid.removeprefix("yt:")
+        if vid and vid not in seen:
+            seen.add(vid)
+            video_ids.append(vid)
+    if not video_ids:
+        return []
+
+    # One distinct scan of existing comment rows: their `yt:<vid>#c:` prefix
+    # tells us which videos are already done.
+    commented = {
+        eid.split("#c:", 1)[0]
+        for eid in session.execute(
+            select(ReviewSource.external_id)
+            .where(
+                ReviewSource.source == SourceType.YOUTUBE,
+                ReviewSource.external_id.like("yt:%#c:%"),
+            )
+            .distinct()
+        )
+        .scalars()
+        .all()
+    }
+    pending = [vid for vid in video_ids if f"yt:{vid}" not in commented]
+    return pending[:MAX_COMMENT_VIDEOS_PER_RUN]
 
 
 def _finish_job(
