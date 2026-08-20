@@ -7,6 +7,7 @@ from datetime import datetime
 
 from geoalchemy2 import Geography
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -73,7 +74,8 @@ class Restaurant(UUIDMixin, TimestampMixin, Base):
     opening_hours: Mapped[str | None] = mapped_column(Text)
 
     osm_type: Mapped[str | None] = mapped_column(String(12))
-    osm_id: Mapped[int | None] = mapped_column(Integer)
+    # OSM node ids are beyond 32 bits now; int4 overflows on insert.
+    osm_id: Mapped[int | None] = mapped_column(BigInteger)
 
     is_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

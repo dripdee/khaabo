@@ -57,6 +57,12 @@ EXTERNAL_ID_PREFIX = "wikidata:"
 # Kitchen-scale classes: restaurant, cafe, fast food, coffeehouse, tea house.
 FOOD_CLASSES = ("wd:Q11707", "wd:Q12444960", "wd:Q1751429", "wd:Q30022", "wd:Q30023")
 
+# Administrative-area entity per city (`wdt:P131` containment). The geo-spatial
+# `wikibase:around` service errors out on the public endpoint, so we match by
+# "located in" instead; Wikidata coverage does not include coordinates for most
+# rows anyway, so `--create` skips anything without them.
+CITY_WIKIDATA_QIDS = {"kolkata": "Q1348"}
+
 # Alias confidence: Wikidata labels are clean, but altLabels can hold vestigial
 # transcriptions — deliberately below OSM's 0.7 default and far below a source
 # key. Matching strength is limited downstream anyway (0.9 bar).
@@ -66,23 +72,13 @@ _SPARQL_TEMPLATE = """
 PREFIX wdt: <http://www.wikidata.org/prop/direct/>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-PREFIX wikibase: <http://wikiba.se/ontology#>
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
 
-SELECT DISTINCT ?item ?label ?alias ?lat ?lng WHERE {{
+SELECT DISTINCT ?item ?label ?alias WHERE {{
   ?item wdt:P31 ?class .
   VALUES ?class {{ {classes} }}
-  ?item wdt:P625 ?location .
-  SERVICE wikibase:around {{
-    ?item wdt:P625 ?loc .
-    bd:serviceParam wikibase:center "Point({lng} {lat})"^^geo:wktLiteral .
-    bd:serviceParam wikibase:radius "{radius_km}" .
-  }}
+  ?item wdt:P131 wd:{qid} .
   ?item rdfs:label ?label FILTER(LANG(?label) = "en") .
   OPTIONAL {{ ?item skos:altLabel ?alias FILTER(LANG(?alias) = "en") . }}
-  BIND(geof:latitude(?location) AS ?lat)
-  BIND(geof:longitude(?location) AS ?lng)
 }}
 """
 
@@ -96,14 +92,9 @@ class WikidataPlace:
     lng: float | None = None
 
 
-async def fetch_wikidata_places(lat: float, lng: float, radius_km: float) -> list[WikidataPlace]:
+async def fetch_wikidata_places(entity_qid: str) -> list[WikidataPlace]:
     """One SPARQL query per city; Wikidata coverage is small enough to fit."""
-    query = _SPARQL_TEMPLATE.format(
-        classes=" ".join(FOOD_CLASSES),
-        lat=lat,
-        lng=lng,
-        radius_km=max(1, int(radius_km)),
-    )
+    query = _SPARQL_TEMPLATE.format(classes=" ".join(FOOD_CLASSES), qid=entity_qid)
     headers = {"User-Agent": settings.user_agent, "Accept": "application/sparql-results+json"}
 
     try:
@@ -289,12 +280,17 @@ def enrich_city_sync(session: Session, city: City, places: list[WikidataPlace], 
 
 
 def enrich_city(city: City, *, create: bool) -> dict:
-    radius_km = max(1.0, city.radius_m / 1000.0)
-    places = asyncio.run(fetch_wikidata_places(float(city.lat), float(city.lng), radius_km))
+    qid = CITY_WIKIDATA_QIDS.get(city.slug)
+    zeros = {"places": 0, "aliases_added": 0, "created": 0, "skipped": 0}
+    if qid is None:
+        log.warning("wikidata_city_unknown", city=city.slug)
+        return zeros
+
+    places = asyncio.run(fetch_wikidata_places(qid))
     log.info("wikidata_fetched", city=city.slug, count=len(places))
 
     if not places:
-        return {"places": 0, "aliases_added": 0, "created": 0, "skipped": 0}
+        return zeros
 
     with sync_session() as session:
         return enrich_city_sync(session, city, places, create=create)

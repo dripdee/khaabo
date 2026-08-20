@@ -45,37 +45,35 @@ class TestParseWikidataResponse:
     async def test_label_and_alias_are_collected(self, monkeypatch):
         _mock_client(monkeypatch, {"head": {}, "results": {"bindings": _sparql_bindings()}})
 
-        places = await fetch_wikidata_places(22.5726, 88.3639, 25.0)
+        places = await fetch_wikidata_places("Q1348")
 
         assert len(places) == 1
         place = places[0]
         assert place.qid == "Q4732"
         assert place.label == "Arsalan"
         assert place.aliases == {"Arsalan Park Circus"}
-        assert place.lat == 22.5726
-        assert place.lng == 88.3639
 
     async def test_alias_equal_to_label_is_not_double_counted(self, monkeypatch):
         row = _sparql_bindings()[0]
         row["alias"] = {"value": "Arsalan"}
         _mock_client(monkeypatch, {"head": {}, "results": {"bindings": [row]}})
 
-        places = await fetch_wikidata_places(22.5726, 88.3639, 25.0)
+        places = await fetch_wikidata_places("Q1348")
         assert places[0].aliases == set()
 
-    async def test_missing_coordinates_are_left_none(self, monkeypatch):
+    async def test_places_without_coordinates_are_kept_for_alias_matching(self, monkeypatch):
         row = _sparql_bindings()[0]
         del row["lat"]
         del row["lng"]
         _mock_client(monkeypatch, {"head": {}, "results": {"bindings": [row]}})
 
-        places = await fetch_wikidata_places(22.5726, 88.3639, 25.0)
+        places = await fetch_wikidata_places("Q1348")
         assert places[0].lat is None
         assert places[0].lng is None
 
     async def test_empty_results_yield_no_places(self, monkeypatch):
         _mock_client(monkeypatch, {"head": {}, "results": {"bindings": []}})
-        assert await fetch_wikidata_places(22.5726, 88.3639, 25.0) == []
+        assert await fetch_wikidata_places("Q1348") == []
 
     async def test_network_failure_is_swallowed_not_raised(self, monkeypatch):
         """A flaky SPARQL endpoint must not kill a scheduled enrichment run."""
@@ -85,7 +83,7 @@ class TestParseWikidataResponse:
         client.__aexit__ = AsyncMock(return_value=False)
         monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client)
 
-        assert await fetch_wikidata_places(22.5726, 88.3639, 25.0) == []
+        assert await fetch_wikidata_places("Q1348") == []
 
 
 class _FakeAliasRow:

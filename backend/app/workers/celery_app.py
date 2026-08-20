@@ -94,7 +94,8 @@ celery_app.conf.beat_schedule = {
     },
     "process-pending-ai": {
         "task": "ai.process_pending",
-        "schedule": 120.0,  # near-real-time for user reviews
+        "schedule": crontab(minute="*/15"),  # user reviews pick up within 15 min;
+        # a 2-minute cycle burned the free-tier Redis budget with no-op polls
     },
     "ranking-nightly-sweep": {
         "task": "ranking.nightly_sweep",
