@@ -122,6 +122,14 @@ class OverpassAdapter(SourceAdapter):
         osm_type = element.get("type", "node")
         osm_id = element.get("id")
 
+        # OSM lets values repeat via `;` ("+91-…;+91-…"). The catalog columns
+        # are fixed-width; keep the first entry and clip to the column size so
+        # a chatty tag can never abort the whole city ingest.
+        phone = tags.get("phone") or tags.get("contact:phone") or ""
+        phone = phone.split(";")[0].strip()[:40] or None
+        area = tags.get("addr:suburb") or tags.get("addr:neighbourhood") or ""
+        area = area.strip()[:160] or None
+
         return RawPlace(
             source=SourceType.OSM,
             external_id=f"{osm_type}/{osm_id}",
@@ -129,10 +137,10 @@ class OverpassAdapter(SourceAdapter):
             lat=float(lat),
             lng=float(lng),
             address=_compose_address(tags),
-            area=tags.get("addr:suburb") or tags.get("addr:neighbourhood"),
+            area=area,
             cuisines=cuisines,
             price_level=_PRICE_HINTS.get((tags.get("price_range") or "").lower()),
-            phone=tags.get("phone") or tags.get("contact:phone"),
+            phone=phone,
             website=tags.get("website") or tags.get("contact:website"),
             opening_hours=tags.get("opening_hours"),
             url=f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
