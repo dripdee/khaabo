@@ -54,7 +54,7 @@ PLACES_TYPES = (
     "meal_takeaway",
 )
 
-MAX_RESULTS_PER_PAGE = 20  # API maximum for searchNearby
+MAX_RESULTS_PER_PAGE = 20  # API maximum for searchNearby (`maxResultCount` in REST)
 MAX_PAGES_PER_CELL = 3  # Places API caps token pagination at 3 pages
 
 # ~3 km grid over a 25 km radius circle yields ~250-550 cells.
@@ -235,6 +235,7 @@ class GooglePlacesAdapter(SourceAdapter):
                             cell_lat=round(cell_lat, 4),
                             cell_lng=round(cell_lng, 4),
                             status=status,
+                            error=exc.message[:200],
                         )
                         break
 
@@ -275,7 +276,7 @@ class GooglePlacesAdapter(SourceAdapter):
                     "radius": min(SEARCH_RADIUS_M, _MAX_API_RADIUS_M),
                 }
             },
-            "maxResults": MAX_RESULTS_PER_PAGE,
+            "maxResultCount": MAX_RESULTS_PER_PAGE,
         }
         if page_token:
             body["pageToken"] = page_token
