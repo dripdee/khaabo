@@ -12,6 +12,7 @@ import DishMapPage from "@/pages/DishMapPage";
 
 const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const RestaurantPage = lazy(() => import("@/pages/RestaurantPage"));
+const CityMapPage = lazy(() => import("@/pages/CityMapPage"));
 const TrendingPage = lazy(() => import("@/pages/TrendingPage"));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 const BookmarksPage = lazy(() => import("@/pages/BookmarksPage"));
@@ -49,6 +50,14 @@ export function App() {
           element={
             <Suspense fallback={<RouteFallback />}>
               <RestaurantPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="map"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <CityMapPage />
             </Suspense>
           }
         />

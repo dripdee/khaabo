@@ -81,6 +81,9 @@ class Restaurant(UUIDMixin, TimestampMixin, Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     data_confidence: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.5)
     review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Google aggregate rating only (ToS: no review text, monthly refresh cadence).
+    google_rating: Mapped[float | None] = mapped_column(Float)
+    google_rating_count: Mapped[int | None] = mapped_column(Integer)
 
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

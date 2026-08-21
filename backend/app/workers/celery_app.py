@@ -82,6 +82,12 @@ celery_app.conf.beat_schedule = {
         "task": "ingestion.discover_places",
         "schedule": crontab(minute=15, hour=f"*/{settings.source_interval_osm_hours}"),
     },
+    "discover-google-places": {
+        # Monthly refresh: the sweep is capped at the free tier (~30k requests)
+        # and anything faster would burn the Google budget for no product gain.
+        "task": "ingestion.discover_google_places",
+        "schedule": crontab(minute=40, hour=3, day_of_month=1),
+    },
     "fetch-reddit": {
         "task": "ingestion.fetch_reviews",
         "schedule": crontab(minute=5, hour=f"*/{settings.source_interval_reddit_hours}"),

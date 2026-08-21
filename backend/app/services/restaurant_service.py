@@ -148,6 +148,10 @@ async def get_restaurant_detail(
         lng=float(restaurant.lng),
         cuisines=list(restaurant.cuisines or []),
         price_level=restaurant.price_level,
+        google_rating=(
+            float(restaurant.google_rating) if restaurant.google_rating is not None else None
+        ),
+        google_rating_count=restaurant.google_rating_count,
         address=restaurant.address,
         phone=restaurant.phone,
         website=restaurant.website,

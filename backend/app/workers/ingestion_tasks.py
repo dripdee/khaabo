@@ -15,6 +15,7 @@ from celery import shared_task
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import settings
 from app.core.errors import PermanentSourceError, TransientSourceError
 from app.core.logging import get_logger
 from app.db.session import sync_session
@@ -148,6 +149,98 @@ def discover_places(self, city_slug: str | None = None) -> dict:
             except PermanentSourceError as exc:
                 _finish_job(job, counters, JobStatus.FAILED, str(exc))
                 log.error("discover_places_permanent_failure", city=city.slug, error=str(exc))
+            except TransientSourceError as exc:
+                _finish_job(job, counters, JobStatus.FAILED, str(exc))
+                session.commit()
+                raise self.retry(exc=exc) from exc
+
+    return totals
+
+
+# The Google sweep grows the catalog 10-20x; the in-memory candidate list is
+# rebuilt every N creations so new places resolve against each other, but not
+# per-place (a full re-scan of 10k rows per item is pure waste).
+_GOOGLE_CANDIDATE_RELOAD_EVERY = 50
+
+
+@celery_app.task(name="ingestion.discover_google_places", bind=True, **RETRY_KWARGS)
+def discover_google_places(self, city_slug: str | None = None) -> dict:
+    """Monthly Google Places catalog sweep: places + star ratings per city."""
+    totals: dict[str, dict] = {}
+
+    with sync_session() as session:
+        adapter = get_adapter(SourceType.GOOGLE)
+        if not adapter.enabled:
+            return {"status": "disabled", "source": "google"}
+
+        cities = (
+            [c for c in _active_cities(session) if c.slug == city_slug]
+            if city_slug
+            else _active_cities(session)
+        )
+
+        for city in cities:
+            job = _claim_job(
+                session,
+                SourceType.GOOGLE,
+                city,
+                {"kind": "discover_places"},
+                kind="discover_places",
+                interval=settings.google_refresh_interval_hours,
+            )
+            if job is None:
+                totals[city.slug] = {"status": "skipped_duplicate"}
+                continue
+
+            counters = IngestCounters()
+            try:
+                places = asyncio.run(adapter.discover_places(city_ref(city)))
+                candidates = load_candidates(session, city.id)
+                counters.seen = len(places)
+
+                for i, place in enumerate(places, 1):
+                    _, action = upsert_place(session, city, place, candidates=candidates)
+                    if action == "created":
+                        counters.created += 1
+                        # Keep resolution current as the catalog grows, without a
+                        # full table scan on every single place.
+                        if counters.created % _GOOGLE_CANDIDATE_RELOAD_EVERY == 0:
+                            candidates = load_candidates(session, city.id)
+                    elif action == "updated":
+                        counters.updated += 1
+                    elif action == "conflict":
+                        counters.conflicts += 1
+                        counters.skipped += 1
+                    else:
+                        counters.skipped += 1
+                    # Chunked commits: Supabase's statement timeout kills a
+                    # whole-city insert inside one long transaction.
+                    if i % 100 == 0:
+                        session.commit()
+                session.commit()
+
+                _finish_job(job, counters, JobStatus.SUCCESS)
+                totals[city.slug] = {
+                    "seen": counters.seen,
+                    "created": counters.created,
+                    "updated": counters.updated,
+                    "skipped": counters.skipped,
+                    "conflicts": counters.conflicts,
+                }
+                log.info(
+                    "google_places_ingested",
+                    city=city.slug,
+                    seen=counters.seen,
+                    created=counters.created,
+                    updated=counters.updated,
+                    skipped=counters.skipped,
+                )
+            except PermanentSourceError as exc:
+                _finish_job(job, counters, JobStatus.FAILED, str(exc))
+                session.commit()
+                log.error(
+                    "discover_google_places_permanent_failure", city=city.slug, error=str(exc)
+                )
             except TransientSourceError as exc:
                 _finish_job(job, counters, JobStatus.FAILED, str(exc))
                 session.commit()

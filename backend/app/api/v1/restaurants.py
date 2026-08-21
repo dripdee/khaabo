@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from app.api.deps import DbSession, OptionalUser, PaginationDep, rate_limit_read
 from app.models import Restaurant, RestaurantScore
-from app.schemas.dish import FoodDnaOut, RestaurantBrief, RestaurantDetailOut
+from app.schemas.dish import CityMapPointOut, FoodDnaOut, RestaurantBrief, RestaurantDetailOut
 from app.services.dish_service import get_city
 from app.services.restaurant_service import (
     get_food_dna,
@@ -71,6 +71,8 @@ async def list_restaurants(
                 lng=float(r.lng),
                 cuisines=list(r.cuisines or []),
                 price_level=r.price_level,
+                google_rating=float(r.google_rating) if r.google_rating is not None else None,
+                google_rating_count=r.google_rating_count,
             ).model_dump(mode="json")
             for r in rows
         ],
@@ -80,6 +82,52 @@ async def list_restaurants(
         "has_more": pagination.page * pagination.page_size < int(total),
         "city_slug": city_row.slug,
         "attribution": ["© OpenStreetMap contributors"],
+    }
+
+
+@router.get("/locations", response_model=dict, summary="Dots for the city-wide map")
+async def restaurant_locations(
+    session: DbSession,
+    city: Annotated[str | None, Query(max_length=80)] = None,
+) -> dict:
+    """Slim location list for the whole-city map — no reviews, no scores.
+
+    Declared before `/{restaurant_id}` so the literal path is not shadowed by
+    the parameter route.
+    """
+    city_row = await get_city(session, city)
+
+    rows = (
+        await session.execute(
+            select(
+                Restaurant.id,
+                Restaurant.name,
+                Restaurant.slug,
+                Restaurant.lat,
+                Restaurant.lng,
+                Restaurant.google_rating,
+                Restaurant.google_rating_count,
+            )
+            .where(Restaurant.city_id == city_row.id, Restaurant.is_closed.is_(False))
+            .order_by(Restaurant.name)
+        )
+    ).all()
+
+    return {
+        "city_slug": city_row.slug,
+        "items": [
+            CityMapPointOut(
+                id=str(r.id),
+                name=r.name,
+                slug=r.slug,
+                lat=float(r.lat),
+                lng=float(r.lng),
+                google_rating=float(r.google_rating) if r.google_rating is not None else None,
+                google_rating_count=r.google_rating_count,
+            ).model_dump(mode="json")
+            for r in rows
+        ],
+        "attribution": ["© OpenStreetMap contributors", "Ratings: Google"],
     }
 
 

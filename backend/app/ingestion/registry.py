@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.core.config import settings
 from app.ingestion.base import SourceAdapter
+from app.ingestion.google_places import GooglePlacesAdapter
 from app.ingestion.osm import NominatimAdapter, OverpassAdapter
 from app.ingestion.reddit import RedditAdapter
 from app.ingestion.youtube import YouTubeAdapter
@@ -17,6 +18,7 @@ _ADAPTERS: dict[SourceType, type[SourceAdapter]] = {
     SourceType.OSM: OverpassAdapter,
     SourceType.REDDIT: RedditAdapter,
     SourceType.YOUTUBE: YouTubeAdapter,
+    SourceType.GOOGLE: GooglePlacesAdapter,
 }
 
 
@@ -50,10 +52,12 @@ def interval_hours(source: SourceType | str) -> int:
         SourceType.OSM: settings.source_interval_osm_hours,
         SourceType.REDDIT: settings.source_interval_reddit_hours,
         SourceType.YOUTUBE: settings.source_interval_youtube_hours,
+        SourceType.GOOGLE: settings.google_refresh_interval_hours,
     }.get(SourceType(source), 24)
 
 
 __all__ = [
+    "GooglePlacesAdapter",
     "NominatimAdapter",
     "OverpassAdapter",
     "RedditAdapter",

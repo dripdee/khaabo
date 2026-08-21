@@ -26,6 +26,7 @@ class SourceType(StrEnum):
     OSM = "osm"
     REDDIT = "reddit"
     YOUTUBE = "youtube"
+    GOOGLE = "google"
     USER = "user"
     MANUAL = "manual"
 

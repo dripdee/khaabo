@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     youtube_daily_quota_units: int = 9000
     youtube_max_videos_per_run: int = 25
 
+    google_places_api_key: str = ""
+    # Free cap for the India billing profile is 35,000 Nearby Search Pro
+    # requests/month; the budget is deliberately set below it.
+    google_places_monthly_limit: int = 30000
+    google_places_max_requests_per_run: int = 2500
+    google_refresh_interval_hours: int = Field(default=720, ge=1, le=2160)
+
     # ── ranking ─────────────────────────────────────────────────────────────
     ranking_w_sentiment: float = 0.35
     ranking_w_recency: float = 0.20

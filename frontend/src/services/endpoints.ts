@@ -8,6 +8,7 @@ import { api } from "@/services/client";
 import type {
   Bookmark,
   City,
+  CityMapPoint,
   Collection,
   DishDetail,
   DishMap,
@@ -100,6 +101,12 @@ export const restaurantsApi = {
     }),
 
   detail: (id: string) => api.get<RestaurantDetail>(`/restaurants/${id}`),
+
+  locations: (city = DEFAULT_CITY) =>
+    api.get<{ city_slug: string; items: CityMapPoint[]; attribution: string[] }>(
+      "/restaurants/locations",
+      { params: { city } },
+    ),
 
   foodDna: (id: string) => api.get<RestaurantDetail["food_dna"]>(`/restaurants/${id}/food-dna`),
 

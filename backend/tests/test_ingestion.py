@@ -8,6 +8,7 @@ a scheduled job.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -16,6 +17,14 @@ import pytest
 
 from app.core.errors import TransientSourceError
 from app.ingestion.base import CityRef
+from app.ingestion.google_places import (
+    FIELD_MASK,
+    MAX_PAGES_PER_CELL,
+    GooglePlacesAdapter,
+    PlacesQuotaGuard,
+    grid_centers,
+    haversine_m,
+)
 from app.ingestion.osm import OSM_ATTRIBUTION, OverpassAdapter, build_overpass_query
 from app.ingestion.reddit import RedditAdapter
 from app.ingestion.registry import enabled_adapters, get_adapter, interval_hours
@@ -611,6 +620,354 @@ class TestRegistry:
     def test_intervals_are_within_the_required_range(self):
         for source in (SourceType.OSM, SourceType.REDDIT, SourceType.YOUTUBE):
             assert 1 <= interval_hours(source) <= 168
+
+    def test_google_source_resolves_with_a_monthly_interval(self):
+        assert isinstance(get_adapter("google"), GooglePlacesAdapter)
+        assert 1 <= interval_hours(SourceType.GOOGLE) <= 2160
+
+
+def _gplace(
+    place_id: str, *, name: str = "Test Kitchen", rating=4.2, count=123, **overrides
+) -> dict:
+    """A Places API (New) item shaped like a `places:searchNearby` response row."""
+    item: dict = {
+        "id": place_id,
+        "displayName": {"text": name, "languageCode": "en"},
+        "formattedAddress": "1 Park Street, Kolkata, West Bengal 700016",
+        "location": {"latitude": 22.55, "longitude": 88.35},
+        "rating": rating,
+        "userRatingCount": count,
+        "types": ["restaurant"],
+        "priceLevel": "PRICE_LEVEL_MODERATE",
+        "websiteUri": "https://example.com",
+    }
+    item.update(overrides)
+    return item
+
+
+class _FakePlacesClient:
+    """httpx.AsyncClient stand-in routing POST places:searchNearby through a
+    handler(body, call_index) that returns a JSON payload, an httpx.Response
+    (for 4xx plumbing) or raises."""
+
+    def __init__(self, handler) -> None:
+        self._handler = handler
+        self.requests: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def request(self, method, url, *, headers=None, **kwargs):
+        self.requests.append(
+            {"method": method, "url": url, "json": kwargs.get("json"), "headers": headers or {}}
+        )
+        result = self._handler(kwargs.get("json") or {}, len(self.requests))
+        if isinstance(result, Exception):
+            raise result
+        fake_request = httpx.Request("POST", "https://places.googleapis.com/v1/places:searchNearby")
+        if isinstance(result, httpx.Response):
+            return result
+        return httpx.Response(200, json=result, request=fake_request)
+
+
+def _patch_places_client(monkeypatch, handler) -> _FakePlacesClient:
+    client = _FakePlacesClient(handler)
+    monkeypatch.setattr(
+        "app.ingestion.google_places.httpx.AsyncClient",
+        lambda **kwargs: client,
+    )
+    return client
+
+
+class TestGooglePlacesParsing:
+    def setup_method(self):
+        self.adapter = GooglePlacesAdapter()
+
+    def test_item_becomes_a_place_with_rating_fields(self):
+        place = self.adapter._to_place(_gplace("ChIJabc123"))
+        assert place is not None
+        assert place.source is SourceType.GOOGLE
+        assert place.external_id == "ChIJabc123"
+        assert place.name == "Test Kitchen"
+        assert place.lat == 22.55
+        assert place.lng == 88.35
+        assert place.rating == 4.2
+        assert place.rating_count == 123
+        assert place.price_level == 2
+        assert place.website == "https://example.com"
+        assert place.url == "https://www.google.com/maps/place/?q=place_id:ChIJabc123"
+        assert place.raw == {"place_id": "ChIJabc123", "types": ["restaurant"]}
+
+    def test_licence_and_attribution_are_recorded(self):
+        place = self.adapter._to_place(_gplace("ChIJabc123"))
+        assert place is not None
+        assert place.license == "google-maps-platform-tos"
+        assert place.attribution == "Google"
+
+    def test_permanently_closed_places_are_dropped(self):
+        assert self.adapter._to_place(_gplace("ChIJx", businessStatus="CLOSED_PERMANENTLY")) is None
+
+    def test_places_without_coordinates_are_dropped(self):
+        assert self.adapter._to_place(_gplace("ChIJx", location={})) is None
+
+    def test_unnamed_places_are_dropped(self):
+        assert self.adapter._to_place(_gplace("ChIJx", displayName={})) is None
+
+    def test_missing_rating_stays_none(self):
+        place = self.adapter._to_place(_gplace("ChIJx", rating=None, userRatingCount=None))
+        assert place is not None
+        assert place.rating is None
+        assert place.rating_count is None
+
+
+class TestGooglePlacesFieldMask:
+    """The bill is per-field-tier. reviews/editorialSummary/photos are Enterprise
+    SKUs ($6-12/1000) — the mask must stay pinned to Pro fields only."""
+
+    def test_mask_carries_the_pro_rating_fields(self):
+        assert "places.rating" in FIELD_MASK
+        assert "places.userRatingCount" in FIELD_MASK
+
+    def test_mask_contains_no_enterprise_fields(self):
+        for banned in ("reviews", "editorialSummary", "photos", "tmosphere"):
+            assert banned not in FIELD_MASK
+
+    def test_mask_is_the_frozen_policy_string(self):
+        assert FIELD_MASK == (
+            "places.id,places.displayName,places.formattedAddress,places.location,"
+            "places.rating,places.userRatingCount,places.types,places.priceLevel,"
+            "places.websiteUri"
+        )
+
+
+class TestGooglePlacesGrid:
+    def test_grid_stays_inside_the_city_radius(self):
+        centers = grid_centers(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m)
+        assert 250 <= len(centers) <= 550
+        for lat, lng in centers:
+            assert haversine_m(KOLKATA.lat, KOLKATA.lng, lat, lng) <= KOLKATA.radius_m
+
+    def test_call_count_is_bounded_by_cells_times_pages(self, monkeypatch):
+        """One cell = at most MAX_PAGES_PER_CELL requests, ever."""
+        monkeypatch.setattr("app.ingestion.google_places.settings.google_places_api_key", "k")
+        monkeypatch.setattr("app.ingestion.google_places._places_limiter.min_interval", 0.0)
+        adapter = GooglePlacesAdapter()
+        adapter.quota = AsyncMock()
+        adapter.quota.reserve = AsyncMock(return_value=True)
+        adapter.quota.refund = AsyncMock()
+        adapter.quota.spent = AsyncMock(return_value=0)
+
+        def handler(_body, call_index):
+            return {"places": [_gplace(f"p{call_index}")]}
+
+        client = _patch_places_client(monkeypatch, handler)
+        expected_cells = len(grid_centers(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m))
+
+        places = asyncio.run(adapter.discover_places(KOLKATA))
+
+        assert len(client.requests) == expected_cells  # no nextPageToken → 1 call/cell
+        assert len(client.requests) <= expected_cells * MAX_PAGES_PER_CELL
+        assert len(places) == expected_cells
+
+
+class TestGooglePlacesSweep:
+    """Sweep mechanics against a single-cell city: reserve/refund discipline,
+    quota exhaustion, per-run cap, pagination and dedup."""
+
+    def setup_method(self):
+        self.adapter = GooglePlacesAdapter()
+        self.adapter.quota = AsyncMock()
+        self.adapter.quota.reserve = AsyncMock(return_value=True)
+        self.adapter.quota.refund = AsyncMock()
+        self.adapter.quota.spent = AsyncMock(return_value=0)
+        self.small_city = CityRef(
+            id="c2", slug="tiny", name="Tiny", lat=22.57, lng=88.36, radius_m=800
+        )
+
+    def _configured(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.ingestion.google_places.settings.google_places_api_key", "test-key"
+        )
+        monkeypatch.setattr("app.ingestion.google_places._places_limiter.min_interval", 0.0)
+
+    async def test_unconfigured_adapter_returns_empty_without_touching_quota(self):
+        assert self.adapter.configured is False
+        assert await self.adapter.discover_places(self.small_city) == []
+        self.adapter.quota.reserve.assert_not_awaited()
+
+    async def test_successful_sweep_requires_and_never_refunds(self, monkeypatch):
+        """A successful response is billed by Google — it must never be refunded."""
+        self._configured(monkeypatch)
+        _patch_places_client(monkeypatch, lambda body, i: {"places": [_gplace(f"p{i}")]})
+
+        places = await self.adapter.discover_places(self.small_city)
+
+        assert len(places) == 1
+        assert self.adapter.quota.reserve.await_count == 1
+        self.adapter.quota.refund.assert_not_awaited()
+
+    async def test_monthly_guard_exhaustion_mid_sweep_returns_partial(self, monkeypatch):
+        """Once the monthly budget is gone the sweep stops with what it has,
+        and no further API call is issued."""
+        self._configured(monkeypatch)
+        self.adapter.quota.reserve = AsyncMock(side_effect=[True, False] + [False] * 10)
+
+        def handler(body, call_index):
+            return {"places": [_gplace("kept")]}
+
+        client = _patch_places_client(monkeypatch, handler)
+        places = await self.adapter.discover_places(self.small_city)
+
+        assert [p.external_id for p in places] == ["kept"]
+        assert len(client.requests) == 1  # refused reservation → no network call
+
+    async def test_failed_call_refunds_the_reserved_unit(self, monkeypatch):
+        """A network failure is not billable: refund and surface as transient."""
+        from app.core.errors import TransientSourceError as _Transient
+
+        self._configured(monkeypatch)
+        _patch_places_client(monkeypatch, lambda body, i: httpx.ConnectError("no route"))
+
+        with pytest.raises(_Transient):
+            await self.adapter.discover_places(self.small_city)
+
+        self.adapter.quota.refund.assert_awaited_once_with(1)
+
+    async def test_429_is_transient_and_refunded(self, monkeypatch):
+        from app.core.errors import TransientSourceError as _Transient
+
+        self._configured(monkeypatch)
+        fake_request = httpx.Request("POST", "https://places.googleapis.com/v1/places:searchNearby")
+        _patch_places_client(monkeypatch, lambda body, i: httpx.Response(429, request=fake_request))
+
+        with pytest.raises(_Transient):
+            await self.adapter.discover_places(self.small_city)
+
+        self.adapter.quota.refund.assert_awaited_once_with(1)
+
+    async def test_credential_error_is_not_refunded(self, monkeypatch):
+        """401/403 reached Google (billed) — no refund; the run fails with a
+        PermanentSourceError so the job row marks FAILED."""
+        from app.core.errors import PermanentSourceError as _Permanent
+
+        self._configured(monkeypatch)
+        fake_request = httpx.Request("POST", "https://places.googleapis.com/v1/places:searchNearby")
+        _patch_places_client(monkeypatch, lambda body, i: httpx.Response(403, request=fake_request))
+
+        with pytest.raises(_Permanent):
+            await self.adapter.discover_places(self.small_city)
+
+        self.adapter.quota.refund.assert_not_awaited()
+
+    async def test_per_run_cap_stops_the_sweep(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.ingestion.google_places.settings.google_places_max_requests_per_run", 2
+        )
+        self._configured(monkeypatch)
+
+        def handler(body, call_index):
+            return {"places": [_gplace(f"p{call_index}")]}
+
+        client = _patch_places_client(monkeypatch, handler)
+        # Full-size city: more cells than the cap, so the loop must stop at 2.
+        places = await self.adapter.discover_places(KOLKATA)
+
+        assert len(client.requests) == 2
+        assert len(places) == 2
+
+    async def test_pagination_follows_next_page_token_up_to_three_pages(self, monkeypatch):
+        self._configured(monkeypatch)
+
+        def handler(body, call_index):
+            token = body.get("pageToken")
+            if token is None:
+                return {"places": [_gplace("a1"), _gplace("a2")], "nextPageToken": "tok1"}
+            if token == "tok1":
+                return {"places": [_gplace("a3")], "nextPageToken": "tok2"}
+            return {"places": [_gplace("a4")]}  # third page, no token → stop
+
+        client = _patch_places_client(monkeypatch, handler)
+        places = await self.adapter.discover_places(self.small_city)
+
+        assert len(client.requests) == 3  # hard page cap, never more
+        assert [p.external_id for p in places] == ["a1", "a2", "a3", "a4"]
+
+    async def test_duplicate_place_ids_across_cells_are_deduped(self, monkeypatch):
+        self._configured(monkeypatch)
+        _patch_places_client(monkeypatch, lambda body, i: {"places": [_gplace("same-place")]})
+
+        places = await self.adapter.discover_places(self.small_city)
+
+        assert [p.external_id for p in places] == ["same-place"]
+
+    async def test_non_credential_4xx_skips_the_cell_only(self, monkeypatch):
+        """A 400 is per-cell and billed: no refund, skip the bad cell, keep the run."""
+        self._configured(monkeypatch)
+        fake_request = httpx.Request("POST", "https://places.googleapis.com/v1/places:searchNearby")
+
+        def handler(body, call_index):
+            if call_index == 1:
+                return httpx.Response(400, request=fake_request, text="INVALID_ARGUMENT")
+            return {"places": [_gplace("ok")]}
+
+        client = _patch_places_client(monkeypatch, handler)
+        # Full-size city: cell 1 returns 400 (skipped, still billed), the rest
+        # succeed and dedupe down to a single place.
+        places = await self.adapter.discover_places(KOLKATA)
+
+        assert len(client.requests) > 1  # the run continued past the bad cell
+        assert [p.external_id for p in places] == ["ok"]
+        self.adapter.quota.refund.assert_not_awaited()
+
+
+class TestPlacesQuotaGuard:
+    """The monthly Google budget must be hard-enforced: 35k free Pro requests on
+    the India profile, guard budget 30k — an overrun is real money."""
+
+    async def test_reservations_succeed_within_budget(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.google_places.get_redis", lambda: fake)
+        guard = PlacesQuotaGuard(budget=100)
+
+        assert await guard.reserve(1) is True
+        assert await guard.reserve(1) is True
+        assert await guard.spent() == 2
+
+    async def test_reservation_crossing_budget_is_refused_and_rolled_back(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.google_places.get_redis", lambda: fake)
+        guard = PlacesQuotaGuard(budget=2)
+
+        assert await guard.reserve(2) is True
+        assert await guard.reserve(1) is False
+        assert await guard.spent() == 2
+
+    async def test_key_is_monthly(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.google_places.get_redis", lambda: fake)
+        guard = PlacesQuotaGuard(budget=10)
+
+        await guard.reserve(1)
+        assert list(fake.store) == [f"gplaces:calls:{datetime.now(UTC):%Y-%m}"]
+
+    async def test_refund_returns_units_when_the_call_is_not_billed(self, monkeypatch):
+        fake = FakeRedis()
+        monkeypatch.setattr("app.ingestion.google_places.get_redis", lambda: fake)
+        guard = PlacesQuotaGuard(budget=10)
+
+        assert await guard.reserve(1) is True
+        await guard.refund(1)
+        assert await guard.spent() == 0
+
+    async def test_no_redis_means_run_is_allowed_but_capped_by_run_limit(self, monkeypatch):
+        monkeypatch.setattr("app.ingestion.google_places.get_redis", lambda: None)
+        guard = PlacesQuotaGuard(budget=100)
+
+        assert await guard.reserve(1) is True
+        assert await guard.spent() == 0
 
 
 class TestNormalization:

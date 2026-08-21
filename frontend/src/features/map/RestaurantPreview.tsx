@@ -57,9 +57,7 @@ export function RestaurantPreview({
           </Button>
         </Link>
         <a
-          // Directions deliberately go to OpenStreetMap, keeping the whole product on
-          // free, open mapping rather than a proprietary provider.
-          href={`https://www.openstreetmap.org/directions?to=${marker.lat}%2C${marker.lng}`}
+          href={`https://www.google.com/maps/dir/?api=1&destination=${marker.lat},${marker.lng}`}
           target="_blank"
           rel="noreferrer noopener"
           className="flex-1"

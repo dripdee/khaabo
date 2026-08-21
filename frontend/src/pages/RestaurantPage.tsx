@@ -91,6 +91,25 @@ export default function RestaurantPage() {
 
               <h1 className="text-hero font-display text-text">{restaurant.name}</h1>
 
+              {restaurant.google_rating != null && (
+                <p className="mt-2 text-sm">
+                  <span
+                    className="rounded-full border border-border bg-surface-2 px-2.5 py-1
+                      font-medium text-text"
+                    title={`Google rating, based on ${restaurant.google_rating_count ?? 0} reviews`}
+                  >
+                    ★ {restaurant.google_rating.toFixed(1)}
+                    {restaurant.google_rating_count != null && (
+                      <span className="text-muted">
+                        {" · "}
+                        {restaurant.google_rating_count.toLocaleString("en-IN")}
+                      </span>
+                    )}
+                  </span>
+                  <span className="ml-2 text-xs text-subtle">Rating: Google</span>
+                </p>
+              )}
+
               <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
                 {restaurant.area && <span>{restaurant.area}</span>}
                 {restaurant.price_level && (
@@ -154,7 +173,7 @@ export default function RestaurantPage() {
               <Button size="sm">Write a review</Button>
             </Link>
             <a
-              href={`https://www.openstreetmap.org/directions?to=${restaurant.lat}%2C${restaurant.lng}`}
+              href={`https://www.google.com/maps/dir/?api=1&destination=${restaurant.lat},${restaurant.lng}`}
               target="_blank"
               rel="noreferrer noopener"
             >

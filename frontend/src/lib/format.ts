@@ -113,6 +113,7 @@ export const SOURCE_LABELS: Record<string, string> = {
   user: "Khaabo user",
   reddit: "Reddit",
   youtube: "YouTube",
+  google: "Google",
   osm: "OpenStreetMap",
   manual: "Editorial",
 };

@@ -9,6 +9,7 @@ import { cn } from "@/lib/format";
 
 const NAV = [
   { to: "/trending", label: "Trending" },
+  { to: "/map", label: "Map" },
   { to: "/bookmarks", label: "Saved" },
 ];
 

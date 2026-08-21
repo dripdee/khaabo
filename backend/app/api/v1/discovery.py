@@ -139,6 +139,12 @@ async def trending(
                     lng=float(restaurant.lng),
                     cuisines=list(restaurant.cuisines or []),
                     price_level=restaurant.price_level,
+                    google_rating=(
+                        float(restaurant.google_rating)
+                        if restaurant.google_rating is not None
+                        else None
+                    ),
+                    google_rating_count=restaurant.google_rating_count,
                 ),
                 direction=score.trend.value if score.trend else "stable",
                 delta=float(score.trend_delta) if score.trend_delta is not None else None,

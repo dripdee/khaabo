@@ -50,6 +50,8 @@ class RestaurantBrief(BaseModel):
     lng: float
     cuisines: list[str] = Field(default_factory=list)
     price_level: int | None = None
+    google_rating: float | None = None
+    google_rating_count: int | None = None
 
 
 class DishRestaurantOut(RestaurantBrief):
@@ -122,6 +124,18 @@ class MapMarkerOut(BaseModel):
     price_avg: float | None = None
     trend: str | None = None
     badges: list[str] = Field(default_factory=list)
+
+
+class CityMapPointOut(BaseModel):
+    """One dot on the city-wide map — as light as possible (~14k rows)."""
+
+    id: str
+    name: str
+    slug: str
+    lat: float
+    lng: float
+    google_rating: float | None = None
+    google_rating_count: int | None = None
 
 
 class DishMapOut(BaseModel):

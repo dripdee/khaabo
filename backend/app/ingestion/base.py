@@ -39,6 +39,8 @@ class RawPlace:
     area: str | None = None
     cuisines: list[str] = field(default_factory=list)
     price_level: int | None = None
+    rating: float | None = None
+    rating_count: int | None = None
     phone: str | None = None
     website: str | None = None
     opening_hours: str | None = None

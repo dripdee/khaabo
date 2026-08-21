@@ -48,6 +48,7 @@ export const queryKeys = {
   dishMap: (slug: string, filters: Record<string, unknown>) =>
     ["dish", slug, "map", filters] as const,
   restaurant: (id: string) => ["restaurant", id] as const,
+  restaurantLocations: (city: string) => ["restaurants", "locations", city] as const,
   restaurantDishes: (id: string, page: number) => ["restaurant", id, "dishes", page] as const,
   restaurantReviews: (id: string, page: number) => ["restaurant", id, "reviews", page] as const,
   trending: (params: Record<string, unknown>) => ["trending", params] as const,

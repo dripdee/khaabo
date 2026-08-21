@@ -8,7 +8,7 @@
 
 export type ScoreStatus = "ranked" | "insufficient_data";
 export type TrendDirection = "rising" | "stable" | "declining";
-export type SourceType = "osm" | "reddit" | "youtube" | "user" | "manual";
+export type SourceType = "osm" | "reddit" | "youtube" | "google" | "user" | "manual";
 export type BadgeCode = "best_value" | "hidden_gem" | "most_consistent";
 
 export interface WhyReason {
@@ -82,6 +82,19 @@ export interface RestaurantBrief {
   lng: number;
   cuisines: string[];
   price_level?: number | null;
+  google_rating?: number | null;
+  google_rating_count?: number | null;
+}
+
+/** One dot on the city-wide map — kept light for ~14k rows. */
+export interface CityMapPoint {
+  id: string;
+  name: string;
+  slug: string;
+  lat: number;
+  lng: number;
+  google_rating?: number | null;
+  google_rating_count?: number | null;
 }
 
 /** A restaurant ranked for one specific dish — the core unit of the product. */

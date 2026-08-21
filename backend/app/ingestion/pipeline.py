@@ -123,8 +123,16 @@ def upsert_place(
     """
     candidates = candidates if candidates is not None else load_candidates(session, city.id)
 
+    # Rating aggregates are part of the payload so a monthly Google refresh that
+    # changes a rating counts as "updated" instead of being skipped.
     payload_hash = content_hash(
-        place.name, place.lat, place.lng, place.address, ",".join(sorted(place.cuisines))
+        place.name,
+        place.lat,
+        place.lng,
+        place.address,
+        ",".join(sorted(place.cuisines)),
+        place.rating,
+        place.rating_count,
     )
 
     existing_source = session.execute(
@@ -150,6 +158,9 @@ def upsert_place(
         restaurant.phone = place.phone or restaurant.phone
         restaurant.website = place.website or restaurant.website
         restaurant.opening_hours = place.opening_hours or restaurant.opening_hours
+        if place.source is SourceType.GOOGLE:
+            restaurant.google_rating = place.rating
+            restaurant.google_rating_count = place.rating_count
         restaurant.last_ingested_at = datetime.now(UTC)
 
         existing_source.content_hash = payload_hash
@@ -199,6 +210,9 @@ def upsert_place(
             restaurant.data_confidence = max(
                 float(restaurant.data_confidence), resolution.confidence
             )
+            if place.source is SourceType.GOOGLE:
+                restaurant.google_rating = place.rating
+                restaurant.google_rating_count = place.rating_count
             if normalize_name(place.name) != restaurant.normalized_name:
                 _add_alias(session, restaurant, place.name, place.source)
     else:
@@ -219,6 +233,8 @@ def upsert_place(
             opening_hours=place.opening_hours,
             osm_type=place.raw.get("osm_type") if place.source is SourceType.OSM else None,
             osm_id=place.raw.get("osm_id") if place.source is SourceType.OSM else None,
+            google_rating=place.rating if place.source is SourceType.GOOGLE else None,
+            google_rating_count=place.rating_count if place.source is SourceType.GOOGLE else None,
             data_confidence=resolution.confidence,
             first_seen_at=datetime.now(UTC),
             last_ingested_at=datetime.now(UTC),
