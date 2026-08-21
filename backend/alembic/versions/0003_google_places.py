@@ -23,8 +23,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("restaurants", sa.Column("google_rating", sa.Float(), nullable=True))
-    op.add_column("restaurants", sa.Column("google_rating_count", sa.Integer(), nullable=True))
+    # 0001 builds the baseline from the ORM metadata, so a fresh database already
+    # has these columns — guard for idempotence on both fresh and existing DBs.
+    existing = {
+        column["name"] for column in sa.inspect(op.get_bind()).get_columns("restaurants")
+    }
+    if "google_rating" not in existing:
+        op.add_column("restaurants", sa.Column("google_rating", sa.Float(), nullable=True))
+    if "google_rating_count" not in existing:
+        op.add_column("restaurants", sa.Column("google_rating_count", sa.Integer(), nullable=True))
     # Postgres forbids using a freshly-added enum value within the same
     # transaction on some versions; commit first.
     with op.get_context().autocommit_block():
