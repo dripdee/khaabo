@@ -124,8 +124,13 @@ class Settings(BaseSettings):
     # Free cap for the India billing profile is 35,000 Nearby Search Pro
     # requests/month; the budget is deliberately set below it.
     google_places_monthly_limit: int = 30000
-    google_places_max_requests_per_run: int = 2500
+    google_places_max_requests_per_run: int = 9000
     google_refresh_interval_hours: int = Field(default=720, ge=1, le=2160)
+    # Two-zone sweep geometry: fine cells cover the dense core, coarse cells
+    # cover the suburban ring. See google_places.sweep_cells for the math.
+    google_places_fine_cell_m: int = Field(default=300, ge=50, le=5000)
+    google_places_fine_radius_m: int = Field(default=10000, ge=1000, le=50000)
+    google_places_coarse_cell_m: int = Field(default=1000, ge=100, le=10000)
 
     # ── ranking ─────────────────────────────────────────────────────────────
     ranking_w_sentiment: float = 0.35

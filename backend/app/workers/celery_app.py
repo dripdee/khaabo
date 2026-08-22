@@ -83,10 +83,18 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute=15, hour=f"*/{settings.source_interval_osm_hours}"),
     },
     "discover-google-places": {
-        # Monthly refresh: the sweep is capped at the free tier (~30k requests)
-        # and anything faster would burn the Google budget for no product gain.
+        # Twice-monthly refresh: each sweep is capped at the free tier (~30k
+        # requests/month guard) and anything faster would burn the Google budget
+        # for no product gain.
         "task": "ingestion.discover_google_places",
         "schedule": crontab(minute=40, hour=3, day_of_month=1),
+    },
+    "discover-google-places-offset": {
+        # Same geometry shifted half a cell so places sitting on cell seams during
+        # the day-1 sweep get captured from a neighbouring centre.
+        "task": "ingestion.discover_google_places",
+        "schedule": crontab(minute=40, hour=3, day_of_month=15),
+        "kwargs": {"offset": True},
     },
     "fetch-reddit": {
         "task": "ingestion.fetch_reviews",

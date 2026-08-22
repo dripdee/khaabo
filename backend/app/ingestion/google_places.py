@@ -57,9 +57,9 @@ PLACES_TYPES = (
 MAX_RESULTS_PER_PAGE = 20  # API maximum for searchNearby (`maxResultCount` in REST)
 MAX_PAGES_PER_CELL = 3  # Places API caps token pagination at 3 pages
 
-# ~3 km grid over a 25 km radius circle yields ~250-550 cells.
+# ~3 km grid over a 25 km radius circle yields ~250-550 cells (legacy geometry,
+# kept for grid_centers callers; the live sweep uses sweep_cells below).
 CELL_M = 2500.0
-SEARCH_RADIUS_M = 2500.0  # covers each cell's corners (cell/2 * sqrt(2)) with margin
 _MAX_API_RADIUS_M = 50000
 
 # Contract test: if the frozen mask ever gains Enterprise fields, this trips.
@@ -88,23 +88,73 @@ def haversine_m(lat_a: float, lng_a: float, lat_b: float, lng_b: float) -> float
 
 
 def grid_centers(
-    lat: float, lng: float, radius_m: int, cell_m: float = CELL_M
+    lat: float,
+    lng: float,
+    radius_m: int,
+    cell_m: float = CELL_M,
+    *,
+    offset_fraction: float = 0.0,
 ) -> list[tuple[float, float]]:
     """Cell centres whose distance from the city centre stays within radius_m.
 
     Only cells inside the circle are searched, so the call count is bounded by
     `len(cells) * MAX_PAGES_PER_CELL` and nothing outside the city is queried.
+
+    `offset_fraction` shifts the whole lattice by that fraction of a cell
+    (0.5 = half a cell) so the twice-monthly offset sweep captures places that
+    sat on cell seams during the base sweep.
     """
     n = max(1, int(radius_m // cell_m))
     m_per_deg_lng = _METERS_PER_DEG_LAT * math.cos(math.radians(lat))
+    shift = offset_fraction * cell_m
     centers: list[tuple[float, float]] = []
     for i in range(-n, n + 1):
         for j in range(-n, n + 1):
-            cell_lat = lat + (i * cell_m) / _METERS_PER_DEG_LAT
-            cell_lng = lng + (j * cell_m) / m_per_deg_lng
+            cell_lat = lat + (i * cell_m + shift) / _METERS_PER_DEG_LAT
+            cell_lng = lng + (j * cell_m + shift) / m_per_deg_lng
             if haversine_m(lat, lng, cell_lat, cell_lng) <= radius_m:
                 centers.append((cell_lat, cell_lng))
     return centers
+
+
+def sweep_cells(
+    lat: float, lng: float, radius_m: int, *, offset: bool = False
+) -> list[tuple[float, float, float]]:
+    """Two-zone sweep geometry: `(lat, lng, search_radius_m)` per cell.
+
+    Dense cores saturate Google's 60-results-per-cell cap inside 3 km cells,
+    so the inner `google_places_fine_radius_m` is covered with fine cells and
+    the remaining ring with coarse ones. Kolkata defaults (300 m inside 10 km,
+    1 km out to 25 km): ~3,490 + ~1,650 ≈ 5,100-5,600 cells ≈ ~6,000 requests
+    per sweep — twice monthly stays well inside the 30,000 guard budget.
+
+    Search radius per cell equals the cell size: the exact covering radius is
+    cell/sqrt(2), so the extra overlap only adds place_id duplicates, which
+    the sweep already dedupes.
+
+    `offset=True` shifts every lattice by half a cell (150 m fine / 500 m
+    coarse) for the day-15 seam sweep.
+    """
+    fine_cell = float(settings.google_places_fine_cell_m)
+    fine_radius = min(radius_m, settings.google_places_fine_radius_m)
+    coarse_cell = float(settings.google_places_coarse_cell_m)
+    fraction = 0.5 if offset else 0.0
+
+    cells = [
+        (cell_lat, cell_lng, fine_cell)
+        for cell_lat, cell_lng in grid_centers(
+            lat, lng, fine_radius, fine_cell, offset_fraction=fraction
+        )
+    ]
+    if radius_m > fine_radius:
+        cells.extend(
+            (cell_lat, cell_lng, coarse_cell)
+            for cell_lat, cell_lng in grid_centers(
+                lat, lng, radius_m, coarse_cell, offset_fraction=fraction
+            )
+            if haversine_m(lat, lng, cell_lat, cell_lng) > fine_radius
+        )
+    return cells
 
 
 class PlacesQuotaGuard:
@@ -176,7 +226,7 @@ class GooglePlacesAdapter(SourceAdapter):
     def configured(self) -> bool:
         return bool(settings.google_places_api_key)
 
-    async def discover_places(self, city: CityRef) -> list[RawPlace]:
+    async def discover_places(self, city: CityRef, *, offset: bool = False) -> list[RawPlace]:
         if not self.configured:
             log.info("google_places_skipped_not_configured")
             return []
@@ -187,7 +237,9 @@ class GooglePlacesAdapter(SourceAdapter):
         stopped_early = False
 
         async with httpx.AsyncClient(timeout=30.0, base_url=API_BASE) as client:
-            for cell_lat, cell_lng in grid_centers(city.lat, city.lng, city.radius_m):
+            for cell_lat, cell_lng, cell_radius in sweep_cells(
+                city.lat, city.lng, city.radius_m, offset=offset
+            ):
                 if stopped_early:
                     break
 
@@ -216,7 +268,9 @@ class GooglePlacesAdapter(SourceAdapter):
 
                     log.info("places_quota_reserved", reserved=1, run_total=requests_made + 1)
                     try:
-                        payload = await self._search_cell(client, cell_lat, cell_lng, page_token)
+                        payload = await self._search_cell(
+                            client, cell_lat, cell_lng, cell_radius, page_token
+                        )
                     except TransientSourceError:
                         # Network error / 429 — Google does not bill these: refund.
                         await self.quota.refund(1)
@@ -266,6 +320,7 @@ class GooglePlacesAdapter(SourceAdapter):
         client: httpx.AsyncClient,
         lat: float,
         lng: float,
+        radius_m: float,
         page_token: str | None,
     ) -> dict:
         body: dict = {
@@ -273,7 +328,7 @@ class GooglePlacesAdapter(SourceAdapter):
             "locationRestriction": {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},
-                    "radius": min(SEARCH_RADIUS_M, _MAX_API_RADIUS_M),
+                    "radius": min(radius_m, _MAX_API_RADIUS_M),
                 }
             },
             "maxResultCount": MAX_RESULTS_PER_PAGE,

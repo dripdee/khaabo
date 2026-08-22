@@ -96,6 +96,25 @@ def load_candidates(session: Session, city_id: uuid.UUID) -> list[CandidateResta
     return candidates
 
 
+def candidate_from_place(restaurant: Restaurant, place: RawPlace) -> CandidateRestaurant:
+    """In-memory candidate for a freshly created restaurant row.
+
+    Lets a sweep append to its candidate list in O(1) instead of re-scanning the
+    whole city table after every creation (which is quadratic at 10k+ rows). A new
+    row has no aliases yet and exactly one source key — the one just ingested — so
+    both can be stated directly without touching the (unloaded) relationships.
+    """
+    return CandidateRestaurant(
+        id=str(restaurant.id),
+        name=restaurant.name,
+        normalized_name=restaurant.normalized_name,
+        lat=float(restaurant.lat),
+        lng=float(restaurant.lng),
+        aliases=(),
+        source_keys=((place.source.value, place.external_id),),
+    )
+
+
 def _unique_slug(session: Session, city_id: uuid.UUID, name: str) -> str:
     base = slugify(name)
     slug = base

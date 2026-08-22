@@ -24,6 +24,7 @@ from app.ingestion.google_places import (
     PlacesQuotaGuard,
     grid_centers,
     haversine_m,
+    sweep_cells,
 )
 from app.ingestion.osm import OSM_ATTRIBUTION, OverpassAdapter, build_overpass_query
 from app.ingestion.reddit import RedditAdapter
@@ -750,6 +751,12 @@ class TestGooglePlacesGrid:
         for lat, lng in centers:
             assert haversine_m(KOLKATA.lat, KOLKATA.lng, lat, lng) <= KOLKATA.radius_m
 
+    def test_offset_fraction_shifts_the_lattice(self):
+        base = grid_centers(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m)
+        shifted = grid_centers(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m, offset_fraction=0.5)
+        assert set(base) != set(shifted)
+        assert 0.9 * len(base) <= len(shifted) <= 1.1 * len(base)
+
     def test_call_count_is_bounded_by_cells_times_pages(self, monkeypatch):
         """One cell = at most MAX_PAGES_PER_CELL requests, ever."""
         monkeypatch.setattr("app.ingestion.google_places.settings.google_places_api_key", "k")
@@ -764,13 +771,51 @@ class TestGooglePlacesGrid:
             return {"places": [_gplace(f"p{call_index}")]}
 
         client = _patch_places_client(monkeypatch, handler)
-        expected_cells = len(grid_centers(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m))
+        expected_cells = len(sweep_cells(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m))
 
         places = asyncio.run(adapter.discover_places(KOLKATA))
 
         assert len(client.requests) == expected_cells  # no nextPageToken → 1 call/cell
         assert len(client.requests) <= expected_cells * MAX_PAGES_PER_CELL
         assert len(places) == expected_cells
+
+
+class TestGooglePlacesSweepCells:
+    """Two-zone geometry: fine cells in the dense core, coarse cells in the ring."""
+
+    def test_cell_count_stays_in_the_budgeted_band(self):
+        cells = sweep_cells(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m)
+        assert 4800 <= len(cells) <= 6200
+
+    def test_every_cell_stays_inside_the_city_radius(self):
+        for lat, lng, _radius in sweep_cells(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m):
+            assert haversine_m(KOLKATA.lat, KOLKATA.lng, lat, lng) <= KOLKATA.radius_m
+
+    def test_fine_cells_fill_the_core_and_coarse_cells_the_ring(self):
+        fine_radius = 10000
+        cells = sweep_cells(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m)
+        fine = [c for c in cells if c[2] == 300.0]
+        coarse = [c for c in cells if c[2] == 1000.0]
+        assert len(fine) + len(coarse) == len(cells)
+        assert 3000 <= len(fine) <= 4000
+        assert 1300 <= len(coarse) <= 2000
+        for lat, lng, _ in fine:
+            assert haversine_m(KOLKATA.lat, KOLKATA.lng, lat, lng) <= fine_radius
+        for lat, lng, _ in coarse:
+            assert haversine_m(KOLKATA.lat, KOLKATA.lng, lat, lng) > fine_radius
+
+    def test_offset_moves_every_cell_off_the_base_lattice(self):
+        base = sweep_cells(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m)
+        shifted = sweep_cells(KOLKATA.lat, KOLKATA.lng, KOLKATA.radius_m, offset=True)
+        assert {(round(a, 6), round(b, 6)) for a, b, _ in base} != {
+            (round(a, 6), round(b, 6)) for a, b, _ in shifted
+        }
+        assert 0.9 * len(base) <= len(shifted) <= 1.1 * len(base)
+
+    def test_small_city_falls_back_to_fine_cells_only(self):
+        cells = sweep_cells(KOLKATA.lat, KOLKATA.lng, 800)
+        assert cells
+        assert all(radius == 300.0 for _, _, radius in cells)
 
 
 class TestGooglePlacesSweep:
@@ -784,7 +829,7 @@ class TestGooglePlacesSweep:
         self.adapter.quota.refund = AsyncMock()
         self.adapter.quota.spent = AsyncMock(return_value=0)
         self.small_city = CityRef(
-            id="c2", slug="tiny", name="Tiny", lat=22.57, lng=88.36, radius_m=800
+            id="c2", slug="tiny", name="Tiny", lat=22.57, lng=88.36, radius_m=200
         )
 
     def _configured(self, monkeypatch):
@@ -899,7 +944,12 @@ class TestGooglePlacesSweep:
         self._configured(monkeypatch)
         _patch_places_client(monkeypatch, lambda body, i: {"places": [_gplace("same-place")]})
 
-        places = await self.adapter.discover_places(self.small_city)
+        # 800 m at the default 300 m fine cell = several cells, all returning the
+        # same place id; the sweep must collapse them to one.
+        multi_cell_city = CityRef(
+            id="c3", slug="multi", name="Multi", lat=22.57, lng=88.36, radius_m=800
+        )
+        places = await self.adapter.discover_places(multi_cell_city)
 
         assert [p.external_id for p in places] == ["same-place"]
 

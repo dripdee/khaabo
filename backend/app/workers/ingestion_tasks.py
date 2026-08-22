@@ -21,6 +21,7 @@ from app.core.logging import get_logger
 from app.db.session import sync_session
 from app.ingestion.pipeline import (
     IngestCounters,
+    candidate_from_place,
     city_ref,
     load_candidates,
     store_review,
@@ -157,16 +158,30 @@ def discover_places(self, city_slug: str | None = None) -> dict:
     return totals
 
 
-# The Google sweep grows the catalog 10-20x; the in-memory candidate list is
-# rebuilt every N creations so new places resolve against each other, but not
-# per-place (a full re-scan of 10k rows per item is pure waste).
-_GOOGLE_CANDIDATE_RELOAD_EVERY = 50
+# The Google sweep grows the catalog 10-20x; the in-memory candidate list gains
+# one entry per creation (O(1)) and only rarely re-scans the city table, so new
+# places resolve against each other without the quadratic full reload.
+_GOOGLE_CANDIDATE_RELOAD_EVERY = 2000
 
 
-@celery_app.task(name="ingestion.discover_google_places", bind=True, **RETRY_KWARGS)
-def discover_google_places(self, city_slug: str | None = None) -> dict:
-    """Monthly Google Places catalog sweep: places + star ratings per city."""
+@celery_app.task(
+    name="ingestion.discover_google_places",
+    bind=True,
+    # The fine-grid sweep takes hours; the global 30-min time limit would kill it
+    # mid-run. Override applies to this task only.
+    time_limit=16 * 3600,
+    soft_time_limit=16 * 3600 - 300,
+    **RETRY_KWARGS,
+)
+def discover_google_places(self, city_slug: str | None = None, offset: bool = False) -> dict:
+    """Twice-monthly Google Places catalog sweep: places + star ratings per city.
+
+    `offset=True` is the day-15 run: identical geometry shifted half a cell so
+    places sitting on cell seams during the day-1 sweep get captured. It claims
+    a distinct job kind so the two runs never collide on the job_key.
+    """
     totals: dict[str, dict] = {}
+    kind = "discover_places_offset" if offset else "discover_places"
 
     with sync_session() as session:
         adapter = get_adapter(SourceType.GOOGLE)
@@ -184,8 +199,8 @@ def discover_google_places(self, city_slug: str | None = None) -> dict:
                 session,
                 SourceType.GOOGLE,
                 city,
-                {"kind": "discover_places"},
-                kind="discover_places",
+                {"kind": kind},
+                kind=kind,
                 interval=settings.google_refresh_interval_hours,
             )
             if job is None:
@@ -194,17 +209,21 @@ def discover_google_places(self, city_slug: str | None = None) -> dict:
 
             counters = IngestCounters()
             try:
-                places = asyncio.run(adapter.discover_places(city_ref(city)))
+                places = asyncio.run(adapter.discover_places(city_ref(city), offset=offset))
                 candidates = load_candidates(session, city.id)
                 counters.seen = len(places)
 
                 for i, place in enumerate(places, 1):
-                    _, action = upsert_place(session, city, place, candidates=candidates)
+                    restaurant, action = upsert_place(session, city, place, candidates=candidates)
                     if action == "created":
                         counters.created += 1
-                        # Keep resolution current as the catalog grows, without a
-                        # full table scan on every single place.
+                        # Append the new row to the in-memory list (O(1)) so the
+                        # next place resolves against it; a rare full reload stays
+                        # as a safety net against drift.
+                        if restaurant is not None:
+                            candidates.append(candidate_from_place(restaurant, place))
                         if counters.created % _GOOGLE_CANDIDATE_RELOAD_EVERY == 0:
+                            session.flush()  # make pending source rows visible to the reload
                             candidates = load_candidates(session, city.id)
                     elif action == "updated":
                         counters.updated += 1
